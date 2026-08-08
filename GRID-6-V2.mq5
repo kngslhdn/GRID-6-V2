@@ -1,557 +1,367 @@
 //+------------------------------------------------------------------+
-//|                  GRID-6-V2 - PROTECTION EDITION                 |
-//|        Trend Grid + Recovery Exit + Equity Protection            |
+//| GRID-6-V2 PROTECTION ENGINE                                      |
 //+------------------------------------------------------------------+
 #property strict
-
 #include <Trade/Trade.mqh>
 CTrade trade;
 
-//================ INPUT =================//
 input group "=== ACCOUNT SAFETY ==="
-input double MaxEquityLossPercent = 15.0;   // Hard trailing equity DD from peak
-input double MaxCycleLossPercent  = 7.5;    // Max loss for one grid cycle
-input int    MaxHoldingHours      = 24;     // Force-close stale cycles
+input double MaxEquityLossPercent=15.0;
+input double MaxCycleLossPercent=7.5;
+input int MaxHoldingHours=24;
+input int CooldownAfterStopMinutes=60;
 
 input group "=== PROFIT ENGINE ==="
-input bool   UseTrailingProfit = true;
-input double TargetProfit      = 8.0;
-input double TrailingStartUSD  = 8.0;
-input double LockStep1         = 5.0;       // Peak >= 10 -> lock 5
-input double LockStep2         = 10.0;      // Peak >= 15 -> lock 10
-input double LockStep3         = 15.0;      // Peak >= 20 -> lock 15
+input bool UseTrailingProfit=true;
+input double TrailingStartUSD=8.0;
+input double LockStep1=5.0;
+input double LockStep2=10.0;
+input double LockStep3=15.0;
+input bool UseHardTarget=false;
+input double TargetProfit=8.0;
 
 input group "=== ENTRY ENGINE ==="
-input int    MA_Period = 200;
-input int    RSI_Period = 14;
-input int    RSI_Upper = 70;
-input int    RSI_Lower = 30;
-input double RSI_Mid = 50.0;
-input int    MinSecondsBetweenEntries = 300;
+input int MA_Period=200;
+input int RSI_Period=14;
+input int RSI_Upper=70;
+input int RSI_Lower=30;
+input double RSI_Mid=50.0;
+input int MinSecondsBetweenEntries=300;
+input int MaxSpreadPoints=0;
 
 input group "=== GRID RECOVERY ==="
-input bool   UseGridRecovery = true;
-input int    GridDistance = 5000;            // points
-input double LotSize = 0.02;
-input int    MaxOrders = 12;
-input bool   AddOnlyWithTrend = true;
+input bool UseGridRecovery=true;
+input int GridDistance=5000;
+input double LotSize=0.02;
+input int MaxOrders=12;
+input bool AddOnlyWithTrend=false;
 
 input group "=== EXECUTION ==="
-input ulong  Magic = 88888;
-input int    DeviationPoints = 50;
+input ulong Magic=88888;
+input int DeviationPoints=50;
 
-//================ GLOBAL =================//
-int maHandle = INVALID_HANDLE;
-int rsiHandle = INVALID_HANDLE;
+int maHandle=INVALID_HANDLE;
+int rsiHandle=INVALID_HANDLE;
+double BuyProfit=0.0,SellProfit=0.0;
+int BuyCount=0,SellCount=0;
+double MaxBuyProfit=0.0,MaxSellProfit=0.0;
+datetime CycleStartTime=0,LastEntryTime=0,NextEntryAllowed=0;
+double PeakEquity=0.0;
+bool TradingLocked=false;
 
-double BuyProfit = 0.0, SellProfit = 0.0;
-int BuyCount = 0, SellCount = 0;
-
-double MaxBuyProfit = 0.0;
-double MaxSellProfit = 0.0;
-
-datetime CycleStartTime = 0;
-datetime LastEntryTime = 0;
-double PeakEquity = 0.0;
-bool TradingLocked = false;
-
-//================ INIT =================//
 int OnInit()
 {
    trade.SetExpertMagicNumber(Magic);
    trade.SetDeviationInPoints(DeviationPoints);
    trade.SetTypeFillingBySymbol(_Symbol);
-
-   maHandle = iMA(_Symbol, _Period, MA_Period, 0, MODE_EMA, PRICE_CLOSE);
-   rsiHandle = iRSI(_Symbol, _Period, RSI_Period, PRICE_CLOSE);
-
-   if(maHandle == INVALID_HANDLE || rsiHandle == INVALID_HANDLE)
+   maHandle=iMA(_Symbol,_Period,MA_Period,0,MODE_EMA,PRICE_CLOSE);
+   rsiHandle=iRSI(_Symbol,_Period,RSI_Period,PRICE_CLOSE);
+   if(maHandle==INVALID_HANDLE || rsiHandle==INVALID_HANDLE)
    {
-      Print("[INIT] Failed to create indicator handles. Error=", GetLastError());
+      Print("[INIT] Indicator handle creation failed. Error=",GetLastError());
       return INIT_FAILED;
    }
-
-   PeakEquity = AccountInfoDouble(ACCOUNT_EQUITY);
-   LoadCycleState();
-
+   PeakEquity=AccountInfoDouble(ACCOUNT_EQUITY);
+   UpdatePositions();
+   if(BuyCount==0 && SellCount==0) ResetCycleState();
+   else if(CycleStartTime==0) CycleStartTime=GetOldestOpenTime();
    return INIT_SUCCEEDED;
 }
 
-//================ DEINIT =================//
 void OnDeinit(const int reason)
 {
-   if(maHandle != INVALID_HANDLE)
-      IndicatorRelease(maHandle);
-   if(rsiHandle != INVALID_HANDLE)
-      IndicatorRelease(rsiHandle);
+   if(maHandle!=INVALID_HANDLE) IndicatorRelease(maHandle);
+   if(rsiHandle!=INVALID_HANDLE) IndicatorRelease(rsiHandle);
 }
 
-//================ TICK =================//
 void OnTick()
 {
    UpdatePositions();
-
-   if(CheckEquityStop())
-      return;
-
-   if(TradingLocked)
-      return;
-
-   if(BuyCount == 0 && SellCount == 0)
+   if(CheckEquityStop()) return;
+   if(TradingLocked) return;
+   if(BuyCount==0 && SellCount==0)
    {
       ResetCycleState();
       CheckEntry();
       return;
    }
-
-   if(CheckCycleProtection())
-      return;
-
-   if(ManageExit())
-      return;
-
+   if(CheckCycleProtection()) return;
+   if(ManageExit()) return;
    UpdatePositions();
-
-   if(BuyCount > 0 || SellCount > 0)
-      ManageGridRecovery();
+   if((BuyCount>0 || SellCount>0) && UseGridRecovery) ManageGridRecovery();
 }
 
-//================ UPDATE POSITION =================//
 void UpdatePositions()
 {
-   BuyProfit = 0.0;
-   SellProfit = 0.0;
-   BuyCount = 0;
-   SellCount = 0;
-
-   datetime oldest = 0;
-   datetime newest = 0;
-
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   BuyProfit=0.0; SellProfit=0.0; BuyCount=0; SellCount=0;
+   datetime oldest=0,newest=0;
+   for(int i=PositionsTotal()-1;i>=0;i--)
    {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket == 0)
-         continue;
-
-      if((ulong)PositionGetInteger(POSITION_MAGIC) != Magic)
-         continue;
-      if(PositionGetString(POSITION_SYMBOL) != _Symbol)
-         continue;
-
-      datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
-      if(oldest == 0 || openTime < oldest)
-         oldest = openTime;
-      if(openTime > newest)
-         newest = openTime;
-
-      double profit = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
-      long type = PositionGetInteger(POSITION_TYPE);
-
-      if(type == POSITION_TYPE_BUY)
-      {
-         BuyProfit += profit;
-         BuyCount++;
-      }
-      else if(type == POSITION_TYPE_SELL)
-      {
-         SellProfit += profit;
-         SellCount++;
-      }
+      ulong ticket=PositionGetTicket(i);
+      if(ticket==0) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC)!=Magic) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
+      datetime t=(datetime)PositionGetInteger(POSITION_TIME);
+      if(oldest==0 || t<oldest) oldest=t;
+      if(newest==0 || t>newest) newest=t;
+      double p=PositionGetDouble(POSITION_PROFIT)+PositionGetDouble(POSITION_SWAP);
+      long type=PositionGetInteger(POSITION_TYPE);
+      if(type==POSITION_TYPE_BUY){BuyProfit+=p;BuyCount++;}
+      else if(type==POSITION_TYPE_SELL){SellProfit+=p;SellCount++;}
    }
-
-   if(oldest > 0)
+   if(oldest>0)
    {
-      if(CycleStartTime == 0 || CycleStartTime > oldest)
-         CycleStartTime = oldest;
+      if(CycleStartTime==0 || CycleStartTime>oldest) CycleStartTime=oldest;
+      if(LastEntryTime==0 && newest>0) LastEntryTime=newest;
    }
-   else
-   {
-      CycleStartTime = 0;
-   }
-
-   if(newest > 0 && LastEntryTime == 0)
-      LastEntryTime = newest;
+   else CycleStartTime=0;
 }
 
-//================ ENTRY =================//
+bool GetIndicators(double &ma,double &rsi)
+{
+   double a[1],b[1];
+   if(CopyBuffer(maHandle,0,1,1,a)!=1) return false;
+   if(CopyBuffer(rsiHandle,0,1,1,b)!=1) return false;
+   ma=a[0]; rsi=b[0];
+   return(ma>0.0 && rsi>=0.0 && rsi<=100.0);
+}
+
 void CheckEntry()
 {
-   if(!CanOpenNewEntry())
-      return;
-
-   double ma = 0.0;
-   double rsi = 0.0;
-   double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-
-   if(!GetIndicators(ma, rsi))
-      return;
-
-   bool buySignal = (price > ma && rsi >= RSI_Mid && rsi < RSI_Upper);
-   bool sellSignal = (price < ma && rsi <= RSI_Mid && rsi > RSI_Lower);
-
-   if(buySignal)
-   {
-      if(OpenPosition(ORDER_TYPE_BUY, LotSize))
-         StartCycle();
-   }
-   else if(sellSignal)
-   {
-      if(OpenPosition(ORDER_TYPE_SELL, LotSize))
-         StartCycle();
-   }
+   if(!CanOpenNewEntry()) return;
+   if(!SpreadOK()) return;
+   double ma=0.0,rsi=0.0;
+   if(!GetIndicators(ma,rsi)) return;
+   double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   bool buy=(bid>ma && rsi>=RSI_Mid && rsi<RSI_Upper);
+   bool sell=(bid<ma && rsi<=RSI_Mid && rsi>RSI_Lower);
+   if(buy) OpenPosition(ORDER_TYPE_BUY,LotSize);
+   else if(sell) OpenPosition(ORDER_TYPE_SELL,LotSize);
 }
 
-//================ GRID RECOVERY =================//
 void ManageGridRecovery()
 {
-   if(!UseGridRecovery)
-      return;
-
-   if(BuyCount > 0 && SellCount > 0)
+   if(BuyCount>0 && SellCount>0) return;
+   if(BuyCount>0)
    {
-      Print("[SAFETY] Both BUY and SELL positions detected. No grid expansion.");
-      return;
+      if(BuyCount>=MaxOrders || !CanOpenNewEntry()) return;
+      if(AddOnlyWithTrend && !TrendAllows(POSITION_TYPE_BUY)) return;
+      double last=GetLatestOpenPrice(POSITION_TYPE_BUY);
+      double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
+      if(last>0.0 && bid<=last-GridDistance*_Point) OpenPosition(ORDER_TYPE_BUY,LotSize);
    }
-
-   if(BuyCount > 0)
+   else if(SellCount>0)
    {
-      if(BuyCount >= MaxOrders)
-         return;
-      if(!CanOpenNewEntry())
-         return;
-      if(AddOnlyWithTrend && !TrendAllows(POSITION_TYPE_BUY))
-         return;
-
-      double lastPrice = GetLatestOpenPrice(POSITION_TYPE_BUY);
-      double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-      double trigger = lastPrice - GridDistance * _Point;
-
-      if(lastPrice > 0.0 && bid <= trigger)
-         OpenPosition(ORDER_TYPE_BUY, LotSize);
-   }
-   else if(SellCount > 0)
-   {
-      if(SellCount >= MaxOrders)
-         return;
-      if(!CanOpenNewEntry())
-         return;
-      if(AddOnlyWithTrend && !TrendAllows(POSITION_TYPE_SELL))
-         return;
-
-      double lastPrice = GetLatestOpenPrice(POSITION_TYPE_SELL);
-      double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-      double trigger = lastPrice + GridDistance * _Point;
-
-      if(lastPrice > 0.0 && ask >= trigger)
-         OpenPosition(ORDER_TYPE_SELL, LotSize);
+      if(SellCount>=MaxOrders || !CanOpenNewEntry()) return;
+      if(AddOnlyWithTrend && !TrendAllows(POSITION_TYPE_SELL)) return;
+      double last=GetLatestOpenPrice(POSITION_TYPE_SELL);
+      double ask=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+      if(last>0.0 && ask>=last+GridDistance*_Point) OpenPosition(ORDER_TYPE_SELL,LotSize);
    }
 }
 
-//================ EXIT ENGINE =================//
 bool ManageExit()
 {
-   if(BuyCount > 0)
+   if(BuyCount>0)
    {
-      if(BuyProfit > MaxBuyProfit)
-         MaxBuyProfit = BuyProfit;
-
-      if(TargetProfit > 0.0 && BuyProfit >= TargetProfit)
-      {
-         CloseType(POSITION_TYPE_BUY);
-         return true;
-      }
-
-      double lock = GetLockLevel(MaxBuyProfit);
-      if(UseTrailingProfit && lock > 0.0 && BuyProfit <= lock)
-      {
-         CloseType(POSITION_TYPE_BUY);
-         return true;
-      }
+      if(BuyProfit>MaxBuyProfit) MaxBuyProfit=BuyProfit;
+      if(UseHardTarget && TargetProfit>0.0 && BuyProfit>=TargetProfit){CloseType(POSITION_TYPE_BUY);return true;}
+      double lock=GetLockLevel(MaxBuyProfit);
+      if(UseTrailingProfit && lock>0.0 && BuyProfit<=lock){CloseType(POSITION_TYPE_BUY);return true;}
    }
-
-   if(SellCount > 0)
+   if(SellCount>0)
    {
-      if(SellProfit > MaxSellProfit)
-         MaxSellProfit = SellProfit;
-
-      if(TargetProfit > 0.0 && SellProfit >= TargetProfit)
-      {
-         CloseType(POSITION_TYPE_SELL);
-         return true;
-      }
-
-      double lock = GetLockLevel(MaxSellProfit);
-      if(UseTrailingProfit && lock > 0.0 && SellProfit <= lock)
-      {
-         CloseType(POSITION_TYPE_SELL);
-         return true;
-      }
+      if(SellProfit>MaxSellProfit) MaxSellProfit=SellProfit;
+      if(UseHardTarget && TargetProfit>0.0 && SellProfit>=TargetProfit){CloseType(POSITION_TYPE_SELL);return true;}
+      double lock=GetLockLevel(MaxSellProfit);
+      if(UseTrailingProfit && lock>0.0 && SellProfit<=lock){CloseType(POSITION_TYPE_SELL);return true;}
    }
-
    return false;
 }
 
-//================ LOCK LOGIC =================//
-double GetLockLevel(double maxProfit)
+// Lock is monotonic: 5 -> 10 -> 15 as profit peak grows.
+double GetLockLevel(double peak)
 {
-   if(maxProfit >= 20.0) return LockStep3;
-   if(maxProfit >= 15.0) return LockStep2;
-   if(maxProfit >= 10.0) return LockStep1;
-   if(maxProfit >= TrailingStartUSD) return MathMax(0.0, TrailingStartUSD - 2.0);
+   if(peak>=20.0) return LockStep3;
+   if(peak>=15.0) return LockStep2;
+   if(peak>=10.0) return LockStep1;
+   if(peak>=TrailingStartUSD) return LockStep1;
    return 0.0;
 }
 
-//================ CYCLE PROTECTION =================//
 bool CheckCycleProtection()
 {
-   double cycleProfit = BuyProfit + SellProfit;
-   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
-
-   if(balance <= 0.0)
-      return false;
-
-   double maxLoss = balance * MaxCycleLossPercent / 100.0;
-   if(maxLoss > 0.0 && cycleProfit <= -maxLoss)
+   double balance=AccountInfoDouble(ACCOUNT_BALANCE);
+   if(balance<=0.0) return false;
+   double cycleProfit=BuyProfit+SellProfit;
+   double limit=balance*MaxCycleLossPercent/100.0;
+   if(limit>0.0 && cycleProfit<=-limit)
    {
-      PrintFormat("[CYCLE STOP] Cycle loss %.2f reached limit %.2f", cycleProfit, -maxLoss);
+      PrintFormat("[CYCLE STOP] P/L %.2f limit -%.2f",cycleProfit,limit);
       CloseAllManaged();
+      NextEntryAllowed=TimeCurrent()+CooldownAfterStopMinutes*60;
       ResetCycleState();
       return true;
    }
-
-   if(MaxHoldingHours > 0 && CycleStartTime > 0)
+   if(MaxHoldingHours>0 && CycleStartTime>0)
    {
-      long heldSeconds = (long)(TimeCurrent() - CycleStartTime);
-      if(heldSeconds >= (long)MaxHoldingHours * 3600)
+      long held=(long)(TimeCurrent()-CycleStartTime);
+      if(held>=(long)MaxHoldingHours*3600)
       {
-         PrintFormat("[TIME STOP] Cycle held %d hours. Closing cycle.", heldSeconds / 3600);
+         PrintFormat("[TIME STOP] Holding %d hours",held/3600);
          CloseAllManaged();
+         NextEntryAllowed=TimeCurrent()+CooldownAfterStopMinutes*60;
          ResetCycleState();
          return true;
       }
    }
-
    return false;
 }
 
-//================ EQUITY STOP =================//
 bool CheckEquityStop()
 {
-   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
-   if(equity > PeakEquity)
-      PeakEquity = equity;
-
-   if(PeakEquity <= 0.0 || MaxEquityLossPercent <= 0.0)
-      return false;
-
-   double ddPercent = (PeakEquity - equity) / PeakEquity * 100.0;
-
-   if(ddPercent >= MaxEquityLossPercent)
+   double equity=AccountInfoDouble(ACCOUNT_EQUITY);
+   if(equity>PeakEquity) PeakEquity=equity;
+   if(PeakEquity<=0.0 || MaxEquityLossPercent<=0.0) return false;
+   double dd=(PeakEquity-equity)/PeakEquity*100.0;
+   if(dd>=MaxEquityLossPercent)
    {
-      PrintFormat("[EQUITY STOP] Peak %.2f Equity %.2f DD %.2f%%", PeakEquity, equity, ddPercent);
+      PrintFormat("[EQUITY STOP] Peak %.2f Equity %.2f DD %.2f%%",PeakEquity,equity,dd);
       CloseAllManaged();
-      TradingLocked = true;
+      TradingLocked=true;
       ResetCycleState();
       return true;
    }
-
    return false;
 }
 
-//================ ORDER HELPERS =================//
-bool OpenPosition(ENUM_ORDER_TYPE type, double volume)
+bool OpenPosition(ENUM_ORDER_TYPE type,double volume)
 {
-   volume = NormalizeVolume(volume);
-   if(volume <= 0.0)
-      return false;
-
-   bool result = false;
-
-   if(type == ORDER_TYPE_BUY)
-      result = trade.Buy(volume, _Symbol, 0.0, 0.0, 0.0, "GRID-6-V2 BUY");
-   else if(type == ORDER_TYPE_SELL)
-      result = trade.Sell(volume, _Symbol, 0.0, 0.0, 0.0, "GRID-6-V2 SELL");
-
-   if(!result)
+   volume=NormalizeVolume(volume);
+   if(volume<=0.0 || !SpreadOK()) return false;
+   bool ok=false;
+   if(type==ORDER_TYPE_BUY) ok=trade.Buy(volume,_Symbol,0.0,0.0,0.0,"GRID-6-V2 BUY");
+   else if(type==ORDER_TYPE_SELL) ok=trade.Sell(volume,_Symbol,0.0,0.0,0.0,"GRID-6-V2 SELL");
+   if(!ok)
    {
-      PrintFormat("[ORDER ERROR] type=%d retcode=%u %s", type, trade.ResultRetcode(), trade.ResultRetcodeDescription());
+      PrintFormat("[ORDER ERROR] type=%d retcode=%u %s",type,trade.ResultRetcode(),trade.ResultRetcodeDescription());
       return false;
    }
-
-   LastEntryTime = TimeCurrent();
-   if(CycleStartTime == 0)
-      CycleStartTime = TimeCurrent();
-
+   datetime now=TimeCurrent();
+   LastEntryTime=now;
+   if(CycleStartTime==0) CycleStartTime=now;
    return true;
 }
 
-//================ CLOSE =================//
 void CloseType(long type)
 {
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   bool attempted=false;
+   for(int i=PositionsTotal()-1;i>=0;i--)
    {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket == 0)
-         continue;
-
-      if((ulong)PositionGetInteger(POSITION_MAGIC) != Magic)
-         continue;
-      if(PositionGetString(POSITION_SYMBOL) != _Symbol)
-         continue;
-      if(PositionGetInteger(POSITION_TYPE) != type)
-         continue;
-
-      if(!trade.PositionClose(ticket))
-         PrintFormat("[CLOSE ERROR] ticket=%I64u retcode=%u %s", ticket, trade.ResultRetcode(), trade.ResultRetcodeDescription());
+      ulong ticket=PositionGetTicket(i);
+      if(ticket==0) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC)!=Magic) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
+      if(PositionGetInteger(POSITION_TYPE)!=type) continue;
+      attempted=true;
+      if(!trade.PositionClose(ticket)) PrintFormat("[CLOSE ERROR] %I64u %u %s",ticket,trade.ResultRetcode(),trade.ResultRetcodeDescription());
    }
-
-   if(type == POSITION_TYPE_BUY)
-      MaxBuyProfit = 0.0;
-   else if(type == POSITION_TYPE_SELL)
-      MaxSellProfit = 0.0;
+   if(attempted)
+   {
+      if(type==POSITION_TYPE_BUY) MaxBuyProfit=0.0;
+      else MaxSellProfit=0.0;
+   }
 }
 
 void CloseAllManaged()
 {
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   for(int i=PositionsTotal()-1;i>=0;i--)
    {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket == 0)
-         continue;
-
-      if((ulong)PositionGetInteger(POSITION_MAGIC) != Magic)
-         continue;
-      if(PositionGetString(POSITION_SYMBOL) != _Symbol)
-         continue;
-
-      if(!trade.PositionClose(ticket))
-         PrintFormat("[CLOSE ALL ERROR] ticket=%I64u retcode=%u %s", ticket, trade.ResultRetcode(), trade.ResultRetcodeDescription());
+      ulong ticket=PositionGetTicket(i);
+      if(ticket==0) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC)!=Magic) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
+      if(!trade.PositionClose(ticket)) PrintFormat("[CLOSE ALL ERROR] %I64u %u %s",ticket,trade.ResultRetcode(),trade.ResultRetcodeDescription());
    }
-}
-
-//================ INDICATORS =================//
-bool GetIndicators(double &ma, double &rsi)
-{
-   double maBuffer[1];
-   double rsiBuffer[1];
-
-   if(CopyBuffer(maHandle, 0, 1, 1, maBuffer) != 1)
-      return false;
-   if(CopyBuffer(rsiHandle, 0, 1, 1, rsiBuffer) != 1)
-      return false;
-
-   ma = maBuffer[0];
-   rsi = rsiBuffer[0];
-
-   return (ma > 0.0 && rsi >= 0.0 && rsi <= 100.0);
 }
 
 bool TrendAllows(long type)
 {
-   double ma = 0.0;
-   double rsi = 0.0;
-   if(!GetIndicators(ma, rsi))
-      return false;
-
-   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-
-   if(type == POSITION_TYPE_BUY)
-      return (bid > ma);
-   if(type == POSITION_TYPE_SELL)
-      return (bid < ma);
-
+   double ma=0.0,rsi=0.0;
+   if(!GetIndicators(ma,rsi)) return false;
+   double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   if(type==POSITION_TYPE_BUY) return bid>ma;
+   if(type==POSITION_TYPE_SELL) return bid<ma;
    return false;
 }
 
-//================ POSITION HELPERS =================//
 double GetLatestOpenPrice(long type)
 {
-   datetime latestTime = 0;
-   double latestPrice = 0.0;
-
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   datetime latest=0;
+   ulong latestTicket=0;
+   double price=0.0;
+   for(int i=PositionsTotal()-1;i>=0;i--)
    {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket == 0)
-         continue;
-
-      if((ulong)PositionGetInteger(POSITION_MAGIC) != Magic)
-         continue;
-      if(PositionGetString(POSITION_SYMBOL) != _Symbol)
-         continue;
-      if(PositionGetInteger(POSITION_TYPE) != type)
-         continue;
-
-      datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
-      if(openTime >= latestTime)
-      {
-         latestTime = openTime;
-         latestPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-      }
+      ulong ticket=PositionGetTicket(i);
+      if(ticket==0) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC)!=Magic) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
+      if(PositionGetInteger(POSITION_TYPE)!=type) continue;
+      datetime t=(datetime)PositionGetInteger(POSITION_TIME);
+      if(t>latest || (t==latest && ticket>latestTicket)){latest=t;latestTicket=ticket;price=PositionGetDouble(POSITION_PRICE_OPEN);}
    }
+   return price;
+}
 
-   return latestPrice;
+datetime GetOldestOpenTime()
+{
+   datetime oldest=0;
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong ticket=PositionGetTicket(i);
+      if(ticket==0) continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC)!=Magic) continue;
+      if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
+      datetime t=(datetime)PositionGetInteger(POSITION_TIME);
+      if(oldest==0 || t<oldest) oldest=t;
+   }
+   return oldest;
 }
 
 bool CanOpenNewEntry()
 {
-   if(TradingLocked)
-      return false;
-
-   if(MinSecondsBetweenEntries <= 0 || LastEntryTime == 0)
-      return true;
-
-   return ((long)(TimeCurrent() - LastEntryTime) >= MinSecondsBetweenEntries);
+   if(TradingLocked) return false;
+   if(TimeCurrent()<NextEntryAllowed) return false;
+   if(MinSecondsBetweenEntries<=0 || LastEntryTime==0) return true;
+   return((long)(TimeCurrent()-LastEntryTime)>=MinSecondsBetweenEntries);
 }
 
-//================ CYCLE STATE =================//
-void StartCycle()
+bool SpreadOK()
 {
-   CycleStartTime = TimeCurrent();
-   LastEntryTime = TimeCurrent();
-   MaxBuyProfit = 0.0;
-   MaxSellProfit = 0.0;
+   if(MaxSpreadPoints<=0) return true;
+   double ask=SymbolInfoDouble(_Symbol,SYMBOL_ASK);
+   double bid=SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   if(ask<=0.0 || bid<=0.0) return false;
+   return((ask-bid)/_Point<=MaxSpreadPoints);
 }
 
 void ResetCycleState()
 {
-   MaxBuyProfit = 0.0;
-   MaxSellProfit = 0.0;
-   CycleStartTime = 0;
-   // Keep LastEntryTime so a freshly closed cycle still respects entry cooldown.
+   MaxBuyProfit=0.0;
+   MaxSellProfit=0.0;
+   CycleStartTime=0;
 }
 
-void LoadCycleState()
-{
-   UpdatePositions();
-
-   if(BuyCount == 0 && SellCount == 0)
-      ResetCycleState();
-   else if(CycleStartTime == 0)
-      CycleStartTime = TimeCurrent();
-}
-
-//================ VOLUME =================//
 double NormalizeVolume(double volume)
 {
-   double minVol = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-   double maxVol = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-
-   if(step <= 0.0)
-      return 0.0;
-
-   volume = MathMax(minVol, MathMin(maxVol, volume));
-   volume = MathFloor(volume / step + 1e-8) * step;
-
-   int digits = 0;
-   double s = step;
-   while(s < 1.0 && digits < 8)
-   {
-      s *= 10.0;
-      digits++;
-   }
-
-   return NormalizeDouble(volume, digits);
+   double minVol=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MIN);
+   double maxVol=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_MAX);
+   double step=SymbolInfoDouble(_Symbol,SYMBOL_VOLUME_STEP);
+   if(step<=0.0) return 0.0;
+   volume=MathMax(minVol,MathMin(maxVol,volume));
+   volume=MathFloor(volume/step+1e-8)*step;
+   int digits=0; double s=step;
+   while(s<1.0 && digits<8){s*=10.0;digits++;}
+   return NormalizeDouble(volume,digits);
 }
 //+------------------------------------------------------------------+
