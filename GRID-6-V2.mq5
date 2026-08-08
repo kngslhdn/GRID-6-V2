@@ -107,7 +107,9 @@ void OnTick()
    if(CheckCycleProtection())
       return;
 
-   ManageExit();
+   if(ManageExit())
+      return;
+
    UpdatePositions();
 
    if(BuyCount > 0 || SellCount > 0)
@@ -246,7 +248,7 @@ void ManageGridRecovery()
 }
 
 //================ EXIT ENGINE =================//
-void ManageExit()
+bool ManageExit()
 {
    if(BuyCount > 0)
    {
@@ -256,14 +258,14 @@ void ManageExit()
       if(TargetProfit > 0.0 && BuyProfit >= TargetProfit)
       {
          CloseType(POSITION_TYPE_BUY);
-         return;
+         return true;
       }
 
       double lock = GetLockLevel(MaxBuyProfit);
       if(UseTrailingProfit && lock > 0.0 && BuyProfit <= lock)
       {
          CloseType(POSITION_TYPE_BUY);
-         return;
+         return true;
       }
    }
 
@@ -275,16 +277,18 @@ void ManageExit()
       if(TargetProfit > 0.0 && SellProfit >= TargetProfit)
       {
          CloseType(POSITION_TYPE_SELL);
-         return;
+         return true;
       }
 
       double lock = GetLockLevel(MaxSellProfit);
       if(UseTrailingProfit && lock > 0.0 && SellProfit <= lock)
       {
          CloseType(POSITION_TYPE_SELL);
-         return;
+         return true;
       }
    }
+
+   return false;
 }
 
 //================ LOCK LOGIC =================//
@@ -514,7 +518,7 @@ void ResetCycleState()
    MaxBuyProfit = 0.0;
    MaxSellProfit = 0.0;
    CycleStartTime = 0;
-   LastEntryTime = 0;
+   // Keep LastEntryTime so a freshly closed cycle still respects entry cooldown.
 }
 
 void LoadCycleState()
