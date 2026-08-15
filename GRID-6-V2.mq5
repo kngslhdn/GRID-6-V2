@@ -1,570 +1,406 @@
-// Expert Advisor: GRID 06.V02 - RECOVERY & GROWTH EDITION 2026
-// Adaptive Equity Scaling + Hierarchical Basket Exit Protection
+// Expert Advisor: GRID 06.V02 - TREND & RISK EDITION 2026
+// Regime-aligned directional entries + ATR risk sizing + protected runner exits
 #property strict
 #property copyright "Copyright 2026, Jarvis"
-#property version   "6.23"
+#property version   "7.00"
 
 #include <Trade/Trade.mqh>
 CTrade trade;
 
-//--- Enums ---
 enum Type {Open_Buy_And_Sell, Open__Only_Buy, Open__Only_Sell};
 
-//--- Input Parameters ---
-input string SafeParameters          = "||========== SAFETY & RECOVERY ==========||";
-input double MaxEquityLossPercent    = 12.0;  // Account-level last resort only
-input bool   UseTrailingProfit       = true;
-input double TrailingStartUSD        = 5.0;
-input double TrailingStopUSD         = 2.0;
+//--- Safety / account risk
+input string SafeParameters          = "||========== SAFETY & RISK ==========||";
+input double RiskPerTradePercent     = 0.40;
+input double MaxRiskPerTradePercent  = 0.60;
+input double MaxEquityLossPercent    = 12.0;
+input double MaxDailyLossPercent     = 3.0;
+input int    MaxConsecutiveLosses    = 3;
+input int    CooldownMinutes         = 60;
 
-//--- Basket Risk / Exit Protection ---
-input string BasketRiskSettings      = "||========== BASKET RISK / EXIT ==========||";
-input bool   UseBasketLossProtection = true;
-input double BasketWarningLossPct    = 3.0;
-input double BasketFreezeLossPct     = 5.0;
-input double BasketHardLossPct       = 7.0;
-input bool   UseBasketTimeout        = true;
-input double MaxBasketHours          = 48.0;
+//--- Regime / trend engine
+input string RegimeSettings           = "||========== REGIME ENGINE ==========||";
+input bool   UseRegimeFilter          = true;
+input ENUM_TIMEFRAMES RegimeTF        = PERIOD_H1;
+input int    FastMAPeriod             = 50;
+input int    SlowMAPeriod             = 200;
+input int    ADXPeriod                = 14;
+input double ADXMinTrend              = 20.0;
+input double ADXStrongTrend           = 25.0;
+input bool   AllowRangeTrading        = false;
 
-//--- Hierarchical Exit Engine ---
-input string ExitEngineSettings      = "||========== HIERARCHICAL EXIT ENGINE ==========||";
-input bool   UseHierarchicalExit     = true;
-input bool   ExitOnRegimeDamage      = true;
-input int    RegimeWarningScore      = 3;
-input int    RegimeHardExitScore     = 6;
-input int    RegimeConfirmBars       = 2;
-input bool   UseDynamicProfitGiveback = true;
-input double PeakLevel1USD           = 5.0;
-input double GivebackLevel1USD       = 2.0;
-input double PeakLevel2USD           = 15.0;
-input double GivebackLevel2USD       = 5.0;
-input double PeakLevel3USD           = 25.0;
-input double GivebackLevel3USD       = 7.0;
-input double PeakLevel4USD           = 40.0;
-input double GivebackLevel4USD       = 10.0;
-input double ATRTrailingStartUSD     = 20.0;
-input double ATRTrailingMultiplier   = 2.0;
-input int    CampaignGraceHours      = 4;
-input int    CampaignStaleHours      = 8;
-input double CampaignStaleMinProfit  = 0.0;
+//--- Entry engine
+input string EntrySettings            = "||========== ENTRY ENGINE ==========||";
+input ENUM_TIMEFRAMES EntryTF         = PERIOD_M15;
+input int    BreakoutLookback         = 12;
+input int    PullbackMAPeriod         = 20;
+input int    RSIPeriod                = 14;
+input double BuyRSIMin                = 45.0;
+input double BuyRSIMax                = 68.0;
+input double SellRSIMin               = 32.0;
+input double SellRSIMax               = 55.0;
+input double MinBodyATR               = 0.25;
 
-//--- Indicator Parameters ---
-input string RSI_Settings            = "||========== INDICATORS ==========||";
-input int    MAPeriod                = 200;
-input int    RSIPeriod               = 14;
-input int    RSIUpper                = 70;
-input int    RSILower                = 30;
+//--- Volatility / sizing
+input string VolatilitySettings       = "||========== ATR / POSITION SIZING ==========||";
+input int    ATRPeriod                = 14;
+input double InitialSL_ATR            = 1.80;
+input double MinSL_ATR                = 1.35;
+input double MaxSL_ATR                = 2.60;
+input double MinATRPrice              = 0.30;
+input double MaxSpreadATRPercent      = 12.0;
+input double MaxLotSize               = 0.20;
 
-//--- Grid Parameters ---
-input string Grid_Settings           = "||========== GRID LOGIC ==========||";
-input Type   TypeOrdersPlace         = Open_Buy_And_Sell;
-input double PointsForFirstGap       = 5000.0;
-input double GapMultiplier            = 1.3;
-input double TargetProfitUSD         = 5.0;
-input double ManualLotSize           = 0.01;
-input int    MaxOrders               = 6;
-input int    MagicNumber             = 88888;
-input string CommentsOrders          = "GRID SAFE 2026";
+//--- Trade management
+input string ExitSettings             = "||========== TRADE MANAGEMENT ==========||";
+input double BreakEven_R              = 1.00;
+input double BreakEvenLock_R          = 0.05;
+input double ProfitLock_R             = 1.50;
+input double ProfitLockValue_R        = 0.75;
+input double RunnerStart_R            = 2.00;
+input double RunnerATRMultiplier      = 2.20;
+input double MaxTradeHours            = 18.0;
+input double StaleTradeHours          = 4.0;
+input double StaleMinR                = 0.20;
 
-//--- Trading Hour ---
-input string TradingHourSettings     = "||========== TRADING HOURS ==========||";
-input bool   UseTradingHour          = true;
-input int    StartHour               = 7;
-input int    EndHour                 = 22;
+//--- Trading hours
+input string TradingHourSettings      = "||========== TRADING HOURS ==========||";
+input bool   UseTradingHour           = true;
+input int    StartHour                = 7;
+input int    EndHour                  = 22;
 
-//--- Global Variables ---
+//--- General
+input Type   TypeOrdersPlace          = Open_Buy_And_Sell;
+input int    MagicNumber              = 88888;
+input string CommentsOrders           = "GRID V7 TREND";
+
 string SymbolTrade;
-int    OrdersID, HandleRSI, HandleMA;
-int    BuyOrders, SellOrders;
-double BuyProfits, SellProfits;
-double PriceOpenLastBuy, PriceOpenLastSell;
-
-bool   IsTerminated = false;
+int OrdersID, HandleFastMA, HandleSlowMA, HandleADX, HandleATR, HandleRSI, HandleEntryMA;
+datetime LastEntryTime = 0;
+datetime DayStartTime = 0;
+double DayStartBalance = 0;
+int ConsecutiveLosses = 0;
 double HighWaterMark = 0;
-double InitialBalance = 0;
-double AdaptiveEquityBase = 0;
-double LockedProfit = 0;
-double MaxBuyProfitSeen = 0;
-double MaxSellProfitSeen = 0;
+bool IsTerminated = false;
 
 bool IsTradingHour()
 {
-   if(!UseTradingHour)
-      return true;
-   MqlDateTime dt;
-   TimeToStruct(TimeCurrent(), dt);
-   int hour = dt.hour;
-   if(StartHour < EndHour)
-      return (hour >= StartHour && hour < EndHour);
-   return (hour >= StartHour || hour < EndHour);
+   if(!UseTradingHour) return true;
+   MqlDateTime dt; TimeToStruct(TimeCurrent(),dt);
+   if(StartHour < EndHour) return dt.hour >= StartHour && dt.hour < EndHour;
+   return dt.hour >= StartHour || dt.hour < EndHour;
+}
+
+void ResetDailyState()
+{
+   MqlDateTime dt; TimeToStruct(TimeCurrent(),dt);
+   dt.hour=0; dt.min=0; dt.sec=0;
+   datetime d=StructToTime(dt);
+   if(DayStartTime!=d)
+   {
+      DayStartTime=d;
+      DayStartBalance=AccountInfoDouble(ACCOUNT_BALANCE);
+      ConsecutiveLosses=0;
+   }
+}
+
+bool GetBufferValue(int handle,int shift,double &value)
+{
+   double b[]; ArraySetAsSeries(b,true);
+   if(handle==INVALID_HANDLE) return false;
+   if(CopyBuffer(handle,0,shift,1,b)<1) return false;
+   value=b[0]; return true;
+}
+
+double GetATR(ENUM_TIMEFRAMES tf=PERIOD_CURRENT,int shift=1)
+{
+   int h = (tf==EntryTF ? HandleATR : INVALID_HANDLE);
+   if(h==INVALID_HANDLE)
+   {
+      h=iATR(SymbolTrade,tf,ATRPeriod);
+      if(h==INVALID_HANDLE) return 0.0;
+      double v=0; bool ok=GetBufferValue(h,shift,v); IndicatorRelease(h); return ok?v:0.0;
+   }
+   double v=0; return GetBufferValue(h,shift,v)?v:0.0;
+}
+
+double HighestHigh(int bars,int start)
+{
+   double hi=-DBL_MAX;
+   for(int i=start;i<start+bars;i++) hi=MathMax(hi,iHigh(SymbolTrade,EntryTF,i));
+   return hi;
+}
+
+double LowestLow(int bars,int start)
+{
+   double lo=DBL_MAX;
+   for(int i=start;i<start+bars;i++) lo=MathMin(lo,iLow(SymbolTrade,EntryTF,i));
+   return lo;
+}
+
+int RegimeDirection()
+{
+   double fast,slow,adx,plusDI,minusDI;
+   if(!GetBufferValue(HandleFastMA,1,fast) || !GetBufferValue(HandleSlowMA,1,slow)) return 0;
+   if(!GetBufferValue(HandleADX,1,adx)) return 0;
+   double di[]; ArraySetAsSeries(di,true);
+   if(CopyBuffer(HandleADX,1,1,1,di)<1) return 0; plusDI=di[0];
+   if(CopyBuffer(HandleADX,2,1,1,di)<1) return 0; minusDI=di[0];
+   double price=iClose(SymbolTrade,RegimeTF,1);
+   if(price<=0) return 0;
+   if(adx<ADXMinTrend)
+      return AllowRangeTrading ? 0 : 99;
+   if(price>fast && fast>slow && plusDI>minusDI) return 1;
+   if(price<fast && fast<slow && minusDI>plusDI) return -1;
+   return 99;
+}
+
+bool SpreadOK(double atr)
+{
+   if(atr<=0) return false;
+   double spread=SymbolInfoDouble(SymbolTrade,SYMBOL_ASK)-SymbolInfoDouble(SymbolTrade,SYMBOL_BID);
+   return spread <= atr*(MaxSpreadATRPercent/100.0);
+}
+
+double NormalizeVolume(double lots)
+{
+   double minLot=SymbolInfoDouble(SymbolTrade,SYMBOL_VOLUME_MIN);
+   double maxLot=SymbolInfoDouble(SymbolTrade,SYMBOL_VOLUME_MAX);
+   double step=SymbolInfoDouble(SymbolTrade,SYMBOL_VOLUME_STEP);
+   double cap=MathMin(MaxLotSize,maxLot);
+   lots=MathMin(lots,cap);
+   if(step<=0) return NormalizeDouble(MathMax(minLot,lots),2);
+   lots=MathFloor(lots/step)*step;
+   return NormalizeDouble(MathMax(minLot,lots),2);
+}
+
+double CalculateLot(double stopDistance)
+{
+   if(stopDistance<=0) return 0;
+   double riskPct=MathMin(RiskPerTradePercent,MaxRiskPerTradePercent);
+   if(ConsecutiveLosses>=2) riskPct*=0.50;
+   double riskMoney=AccountInfoDouble(ACCOUNT_EQUITY)*riskPct/100.0;
+   double tickSize=SymbolInfoDouble(SymbolTrade,SYMBOL_TRADE_TICK_SIZE);
+   double tickValue=SymbolInfoDouble(SymbolTrade,SYMBOL_TRADE_TICK_VALUE);
+   if(tickSize<=0 || tickValue<=0) return NormalizeVolume(SymbolInfoDouble(SymbolTrade,SYMBOL_VOLUME_MIN));
+   double lossPerLot=(stopDistance/tickSize)*tickValue;
+   if(lossPerLot<=0) return NormalizeVolume(SymbolInfoDouble(SymbolTrade,SYMBOL_VOLUME_MIN));
+   return NormalizeVolume(riskMoney/lossPerLot);
+}
+
+bool DailyRiskBlocked()
+{
+   if(DayStartBalance<=0) return true;
+   double eq=AccountInfoDouble(ACCOUNT_EQUITY);
+   double dd=((DayStartBalance-eq)/DayStartBalance)*100.0;
+   return dd>=MaxDailyLossPercent || ConsecutiveLosses>=MaxConsecutiveLosses;
+}
+
+bool HasOpenPosition()
+{
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong ticket=PositionGetTicket(i);
+      if(PositionSelectByTicket(ticket) &&
+         PositionGetInteger(POSITION_MAGIC)==OrdersID &&
+         PositionGetString(POSITION_SYMBOL)==SymbolTrade)
+         return true;
+   }
+   return false;
+}
+
+ulong FindOurPosition()
+{
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong ticket=PositionGetTicket(i);
+      if(PositionSelectByTicket(ticket) &&
+         PositionGetInteger(POSITION_MAGIC)==OrdersID &&
+         PositionGetString(POSITION_SYMBOL)==SymbolTrade)
+         return ticket;
+   }
+   return 0;
+}
+
+bool PlaceDirectionalTrade(int direction)
+{
+   if(direction==0 || direction==99 || HasOpenPosition()) return false;
+   if(DailyRiskBlocked() || !IsTradingHour()) return false;
+   if(TimeCurrent()-LastEntryTime<CooldownMinutes*60) return false;
+   if(TypeOrdersPlace==Open__Only_Buy && direction<0) return false;
+   if(TypeOrdersPlace==Open__Only_Sell && direction>0) return false;
+
+   double atr=GetATR(EntryTF,1);
+   if(atr<MinATRPrice || !SpreadOK(atr)) return false;
+
+   double close1=iClose(SymbolTrade,EntryTF,1);
+   double open1=iOpen(SymbolTrade,EntryTF,1);
+   double body=MathAbs(close1-open1);
+   if(body<atr*MinBodyATR) return false;
+
+   double hi=HighestHigh(BreakoutLookback,2);
+   double lo=LowestLow(BreakoutLookback,2);
+   double entry=(direction>0)?SymbolInfoDouble(SymbolTrade,SYMBOL_ASK):SymbolInfoDouble(SymbolTrade,SYMBOL_BID);
+   if(direction>0 && close1<=hi) return false;
+   if(direction<0 && close1>=lo) return false;
+
+   double rsi; if(!GetBufferValue(HandleRSI,1,rsi)) return false;
+   if(direction>0 && (rsi<BuyRSIMin || rsi>BuyRSIMax)) return false;
+   if(direction<0 && (rsi<SellRSIMin || rsi>SellRSIMax)) return false;
+
+   double entryMA; if(!GetBufferValue(HandleEntryMA,1,entryMA)) return false;
+   if(direction>0 && close1<entryMA) return false;
+   if(direction<0 && close1>entryMA) return false;
+
+   double slDist=MathMax(MinSL_ATR*atr,MathMin(MaxSL_ATR*atr,InitialSL_ATR*atr));
+   double sl=(direction>0)?entry-slDist:entry+slDist;
+   double lots=CalculateLot(slDist);
+   if(lots<=0) return false;
+
+   trade.SetExpertMagicNumber(OrdersID);
+   trade.SetDeviationInPoints(20);
+   bool ok=(direction>0)?trade.Buy(lots,SymbolTrade,entry,sl,0,CommentsOrders):trade.Sell(lots,SymbolTrade,entry,sl,0,CommentsOrders);
+   if(ok) LastEntryTime=TimeCurrent();
+   return ok;
+}
+
+void ManageOpenPosition()
+{
+   ulong ticket=FindOurPosition();
+   if(ticket==0) return;
+   if(!PositionSelectByTicket(ticket)) return;
+
+   ENUM_POSITION_TYPE type=(ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+   double open=PositionGetDouble(POSITION_PRICE_OPEN);
+   double sl=PositionGetDouble(POSITION_SL);
+   double price=(type==POSITION_TYPE_BUY)?SymbolInfoDouble(SymbolTrade,SYMBOL_BID):SymbolInfoDouble(SymbolTrade,SYMBOL_ASK);
+   double riskDistance=MathAbs(open-sl);
+   if(riskDistance<=0) return;
+   double r=(type==POSITION_TYPE_BUY)?(price-open)/riskDistance:(open-price)/riskDistance;
+   double atr=GetATR(EntryTF,1);
+   datetime openTime=(datetime)PositionGetInteger(POSITION_TIME);
+   double ageH=(double)(TimeCurrent()-openTime)/3600.0;
+
+   if(ageH>=MaxTradeHours)
+   {
+      trade.PositionClose(ticket); return;
+   }
+   if(ageH>=StaleTradeHours && r<StaleMinR)
+   {
+      int regime=RegimeDirection();
+      if((type==POSITION_TYPE_BUY && regime<=0) || (type==POSITION_TYPE_SELL && regime>=0))
+      {
+         trade.PositionClose(ticket); return;
+      }
+   }
+
+   double newSL=sl;
+   if(r>=BreakEven_R)
+   {
+      double lock=type==POSITION_TYPE_BUY?open+riskDistance*BreakEvenLock_R:open-riskDistance*BreakEvenLock_R;
+      if((type==POSITION_TYPE_BUY && (sl==0 || lock>newSL)) || (type==POSITION_TYPE_SELL && (sl==0 || lock<newSL))) newSL=lock;
+   }
+   if(r>=ProfitLock_R)
+   {
+      double lock=type==POSITION_TYPE_BUY?open+riskDistance*ProfitLockValue_R:open-riskDistance*ProfitLockValue_R;
+      if((type==POSITION_TYPE_BUY && lock>newSL) || (type==POSITION_TYPE_SELL && lock<newSL)) newSL=lock;
+   }
+   if(r>=RunnerStart_R && atr>0)
+   {
+      double trail=type==POSITION_TYPE_BUY?price-RunnerATRMultiplier*atr:price+RunnerATRMultiplier*atr;
+      if((type==POSITION_TYPE_BUY && trail>newSL) || (type==POSITION_TYPE_SELL && trail<newSL)) newSL=trail;
+   }
+
+   double point=SymbolInfoDouble(SymbolTrade,SYMBOL_POINT);
+   int digits=(int)SymbolInfoInteger(SymbolTrade,SYMBOL_DIGITS);
+   if(type==POSITION_TYPE_BUY && newSL>0 && newSL>sl+point) trade.PositionModify(ticket,NormalizeDouble(newSL,digits),0);
+   if(type==POSITION_TYPE_SELL && newSL>0 && (sl==0 || newSL<sl-point)) trade.PositionModify(ticket,NormalizeDouble(newSL,digits),0);
+}
+
+void UpdateClosedTradeStats()
+{
+   static datetime lastScan=0;
+   datetime from=lastScan>0?lastScan:DayStartTime;
+   if(from<=0) from=TimeCurrent()-86400*30;
+   if(!HistorySelect(from,TimeCurrent())) return;
+   int total=HistoryDealsTotal();
+   for(int i=total-1;i>=0;i--)
+   {
+      ulong deal=HistoryDealGetTicket(i);
+      if(deal==0) continue;
+      if((long)HistoryDealGetInteger(deal,DEAL_MAGIC)!=OrdersID) continue;
+      if(HistoryDealGetString(deal,DEAL_SYMBOL)!=SymbolTrade) continue;
+      datetime t=(datetime)HistoryDealGetInteger(deal,DEAL_TIME);
+      if(t<=lastScan) break;
+      long entry=HistoryDealGetInteger(deal,DEAL_ENTRY);
+      if(entry==DEAL_ENTRY_OUT || entry==DEAL_ENTRY_OUT_BY)
+      {
+         double p=HistoryDealGetDouble(deal,DEAL_PROFIT)+HistoryDealGetDouble(deal,DEAL_SWAP)+HistoryDealGetDouble(deal,DEAL_COMMISSION);
+         if(p<0) ConsecutiveLosses++; else if(p>0) ConsecutiveLosses=0;
+      }
+      if(t>lastScan) lastScan=t;
+   }
 }
 
 int OnInit()
 {
-   SymbolTrade = _Symbol;
-   OrdersID = (MagicNumber == 0) ? 101010 : MagicNumber;
-   HandleRSI = iRSI(SymbolTrade, PERIOD_CURRENT, RSIPeriod, PRICE_CLOSE);
-   HandleMA  = iMA(SymbolTrade, PERIOD_CURRENT, MAPeriod, 0, MODE_SMA, PRICE_CLOSE);
-   HighWaterMark = AccountInfoDouble(ACCOUNT_BALANCE);
-   InitialBalance = AccountInfoDouble(ACCOUNT_BALANCE);
-   AdaptiveEquityBase = InitialBalance;
-   LockedProfit = 0;
-   MaxBuyProfitSeen = 0;
-   MaxSellProfitSeen = 0;
-   if(HandleRSI == INVALID_HANDLE || HandleMA == INVALID_HANDLE)
-   {
-      Print("Gagal inisialisasi indikator!");
-      return(INIT_FAILED);
-   }
-   return(INIT_SUCCEEDED);
+   SymbolTrade=_Symbol;
+   OrdersID=(MagicNumber==0)?101010:MagicNumber;
+   trade.SetExpertMagicNumber(OrdersID);
+   HandleFastMA=iMA(SymbolTrade,RegimeTF,FastMAPeriod,0,MODE_EMA,PRICE_CLOSE);
+   HandleSlowMA=iMA(SymbolTrade,RegimeTF,SlowMAPeriod,0,MODE_EMA,PRICE_CLOSE);
+   HandleADX=iADX(SymbolTrade,RegimeTF,ADXPeriod);
+   HandleATR=iATR(SymbolTrade,EntryTF,ATRPeriod);
+   HandleRSI=iRSI(SymbolTrade,EntryTF,RSIPeriod,PRICE_CLOSE);
+   HandleEntryMA=iMA(SymbolTrade,EntryTF,PullbackMAPeriod,0,MODE_EMA,PRICE_CLOSE);
+   DayStartBalance=AccountInfoDouble(ACCOUNT_BALANCE);
+   HighWaterMark=DayStartBalance;
+   MqlDateTime dt; TimeToStruct(TimeCurrent(),dt); dt.hour=0;dt.min=0;dt.sec=0;DayStartTime=StructToTime(dt);
+   if(HandleFastMA==INVALID_HANDLE || HandleSlowMA==INVALID_HANDLE || HandleADX==INVALID_HANDLE || HandleATR==INVALID_HANDLE || HandleRSI==INVALID_HANDLE || HandleEntryMA==INVALID_HANDLE)
+      return INIT_FAILED;
+   return INIT_SUCCEEDED;
 }
 
 void OnDeinit(const int reason)
 {
-   IndicatorRelease(HandleRSI);
-   IndicatorRelease(HandleMA);
+   if(HandleFastMA!=INVALID_HANDLE) IndicatorRelease(HandleFastMA);
+   if(HandleSlowMA!=INVALID_HANDLE) IndicatorRelease(HandleSlowMA);
+   if(HandleADX!=INVALID_HANDLE) IndicatorRelease(HandleADX);
+   if(HandleATR!=INVALID_HANDLE) IndicatorRelease(HandleATR);
+   if(HandleRSI!=INVALID_HANDLE) IndicatorRelease(HandleRSI);
+   if(HandleEntryMA!=INVALID_HANDLE) IndicatorRelease(HandleEntryMA);
    Comment("");
 }
 
 void OnTick()
 {
-   if(IsTerminated)
-      return;
-
-   UpdateStatus();
-
-   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
-   double equity  = AccountInfoDouble(ACCOUNT_EQUITY);
-
-   LockedProfit = balance - InitialBalance;
-   if(LockedProfit < 0) LockedProfit = 0;
-   AdaptiveEquityBase = InitialBalance + LockedProfit;
-
-   if(balance > HighWaterMark)
-      HighWaterMark = balance;
-
-   bool IsInRecovery = (balance < HighWaterMark);
-   double currentDrawdown = 0;
-
-   if(AdaptiveEquityBase > 0 && equity < AdaptiveEquityBase)
-      currentDrawdown = ((AdaptiveEquityBase - equity) / AdaptiveEquityBase) * 100.0;
-
-   // Account protection remains the final safety layer.
-   if(currentDrawdown >= MaxEquityLossPercent)
-   {
-      PrintFormat("!!! ACCOUNT EMERGENCY CUT: Drawdown %.2f%% !!!", currentDrawdown);
-      CloseAllOrders();
-      IsTerminated = true;
-      return;
-   }
-
-   // Exit and risk management are always active. Trading hours only gate NEW entries.
-   ManageExit(IsInRecovery);
-   UpdateStatus();
    if(IsTerminated) return;
+   ResetDailyState();
+   UpdateClosedTradeStats();
 
-   double rsi = GetRSIValue();
-   double ma = GetMAValue();
-   double price = SymbolInfoDouble(SymbolTrade, SYMBOL_BID);
-
-   int lowRSI = IsInRecovery ? (RSILower - 5) : RSILower;
-   int highRSI = IsInRecovery ? (RSIUpper + 5) : RSIUpper;
-
-   bool canOpenBuy = false;
-   bool canOpenSell = false;
-
-   if(BuyOrders == 0 &&
-      (TypeOrdersPlace == Open_Buy_And_Sell || TypeOrdersPlace == Open__Only_Buy))
+   double balance=AccountInfoDouble(ACCOUNT_BALANCE);
+   double equity=AccountInfoDouble(ACCOUNT_EQUITY);
+   if(balance>HighWaterMark) HighWaterMark=balance;
+   double dd=HighWaterMark>0?((HighWaterMark-equity)/HighWaterMark)*100.0:0;
+   if(dd>=MaxEquityLossPercent)
    {
-      if(price > ma && rsi < lowRSI)
-         canOpenBuy = true;
+      ulong t=FindOurPosition(); if(t>0) trade.PositionClose(t);
+      IsTerminated=true; return;
    }
 
-   if(SellOrders == 0 &&
-      (TypeOrdersPlace == Open_Buy_And_Sell || TypeOrdersPlace == Open__Only_Sell))
+   ManageOpenPosition();
+   if(HasOpenPosition()) return;
+
+   if(!UseTradingHour || IsTradingHour())
    {
-      if(price < ma && rsi > highRSI)
-         canOpenSell = true;
+      int regime=UseRegimeFilter?RegimeDirection():0;
+      if(regime==99) return;
+      if(regime==1) PlaceDirectionalTrade(1);
+      if(regime==-1) PlaceDirectionalTrade(-1);
    }
 
-   bool buyFrozen = IsBasketFrozen(POSITION_TYPE_BUY);
-   bool sellFrozen = IsBasketFrozen(POSITION_TYPE_SELL);
-
-   if(BuyOrders > 0 && BuyOrders < MaxOrders && !buyFrozen)
-   {
-      double gap = PointsForFirstGap * MathPow(GapMultiplier, BuyOrders - 1);
-      if(SymbolInfoDouble(SymbolTrade, SYMBOL_ASK) <= PriceOpenLastBuy - (gap * _Point))
-         canOpenBuy = true;
-   }
-
-   if(SellOrders > 0 && SellOrders < MaxOrders && !sellFrozen)
-   {
-      double gap = PointsForFirstGap * MathPow(GapMultiplier, SellOrders - 1);
-      if(price >= PriceOpenLastSell + (gap * _Point))
-         canOpenSell = true;
-   }
-
-   // Trading hours apply to NEW ENTRY only.
-   if(!IsTradingHour())
-   {
-      DisplayDashboard(currentDrawdown, rsi, IsInRecovery);
-      return;
-   }
-
-   if(canOpenBuy && !buyFrozen)
-      ExecuteTrade(ORDER_TYPE_BUY);
-   if(canOpenSell && !sellFrozen)
-      ExecuteTrade(ORDER_TYPE_SELL);
-
-   UpdateStatus();
-   DisplayDashboard(currentDrawdown, rsi, IsInRecovery);
-}
-
-//========================================================
-// HIERARCHICAL EXIT ENGINE
-//========================================================
-void ManageExit(bool recovery)
-{
-   // BUY basket
-   if(BuyOrders <= 0)
-   {
-      MaxBuyProfitSeen = 0;
-   }
-   else
-   {
-      double buyLossPct = BasketLossPercent(BuyProfits);
-      double buyAgeHrs = GetBasketAgeHours(POSITION_TYPE_BUY);
-
-      if(UseBasketLossProtection && buyLossPct >= BasketHardLossPct)
-      {
-         PrintFormat("BASKET HARD EXIT BUY: loss %.2f%% / P/L %.2f", buyLossPct, BuyProfits);
-         CloseOrdersByType(POSITION_TYPE_BUY);
-         MaxBuyProfitSeen = 0;
-      }
-      else if(UseBasketTimeout && buyAgeHrs >= MaxBasketHours)
-      {
-         PrintFormat("BASKET TIMEOUT BUY: %.2fh / P/L %.2f", buyAgeHrs, BuyProfits);
-         CloseOrdersByType(POSITION_TYPE_BUY);
-         MaxBuyProfitSeen = 0;
-      }
-      else if(UseHierarchicalExit && ExitOnRegimeDamage && BuyProfits < 0)
-      {
-         int score = RegimeExitScore(POSITION_TYPE_BUY);
-         if(score >= RegimeHardExitScore && ConfirmRegimeExit(POSITION_TYPE_BUY))
-         {
-            PrintFormat("THESIS INVALIDATION BUY: score=%d P/L=%.2f", score, BuyProfits);
-            CloseOrdersByType(POSITION_TYPE_BUY);
-            MaxBuyProfitSeen = 0;
-         }
-      }
-
-      if(BuyOrders > 0)
-      {
-         double target = recovery ? (TargetProfitUSD + 2.0) : TargetProfitUSD;
-         UpdatePeakProfit(MaxBuyProfitSeen, BuyProfits);
-         double giveback = DynamicGiveback(MaxBuyProfitSeen);
-         if(UseTrailingProfit && BuyProfits >= TrailingStartUSD && giveback > 0 &&
-            MaxBuyProfitSeen - BuyProfits >= giveback && BuyProfits > 0)
-         {
-            CloseOrdersByType(POSITION_TYPE_BUY);
-            MaxBuyProfitSeen = 0;
-         }
-         else if(!UseTrailingProfit && BuyProfits >= target)
-         {
-            CloseOrdersByType(POSITION_TYPE_BUY);
-            MaxBuyProfitSeen = 0;
-         }
-      }
-   }
-
-   // SELL basket
-   if(SellOrders <= 0)
-   {
-      MaxSellProfitSeen = 0;
-   }
-   else
-   {
-      double sellLossPct = BasketLossPercent(SellProfits);
-      double sellAgeHrs = GetBasketAgeHours(POSITION_TYPE_SELL);
-
-      if(UseBasketLossProtection && sellLossPct >= BasketHardLossPct)
-      {
-         PrintFormat("BASKET HARD EXIT SELL: loss %.2f%% / P/L %.2f", sellLossPct, SellProfits);
-         CloseOrdersByType(POSITION_TYPE_SELL);
-         MaxSellProfitSeen = 0;
-      }
-      else if(UseBasketTimeout && sellAgeHrs >= MaxBasketHours)
-      {
-         PrintFormat("BASKET TIMEOUT SELL: %.2fh / P/L %.2f", sellAgeHrs, SellProfits);
-         CloseOrdersByType(POSITION_TYPE_SELL);
-         MaxSellProfitSeen = 0;
-      }
-      else if(UseHierarchicalExit && ExitOnRegimeDamage && SellProfits < 0)
-      {
-         int score = RegimeExitScore(POSITION_TYPE_SELL);
-         if(score >= RegimeHardExitScore && ConfirmRegimeExit(POSITION_TYPE_SELL))
-         {
-            PrintFormat("THESIS INVALIDATION SELL: score=%d P/L=%.2f", score, SellProfits);
-            CloseOrdersByType(POSITION_TYPE_SELL);
-            MaxSellProfitSeen = 0;
-         }
-      }
-
-      if(SellOrders > 0)
-      {
-         double target = recovery ? (TargetProfitUSD + 2.0) : TargetProfitUSD;
-         UpdatePeakProfit(MaxSellProfitSeen, SellProfits);
-         double giveback = DynamicGiveback(MaxSellProfitSeen);
-         if(UseTrailingProfit && SellProfits >= TrailingStartUSD && giveback > 0 &&
-            MaxSellProfitSeen - SellProfits >= giveback && SellProfits > 0)
-         {
-            CloseOrdersByType(POSITION_TYPE_SELL);
-            MaxSellProfitSeen = 0;
-         }
-         else if(!UseTrailingProfit && SellProfits >= target)
-         {
-            CloseOrdersByType(POSITION_TYPE_SELL);
-            MaxSellProfitSeen = 0;
-         }
-      }
-   }
-}
-
-void UpdatePeakProfit(double &peak, double current)
-{
-   if(current > peak)
-      peak = current;
-   if(current <= 0 && peak < TrailingStartUSD)
-      peak = 0;
-}
-
-double DynamicGiveback(double peak)
-{
-   if(!UseDynamicProfitGiveback)
-      return TrailingStopUSD;
-   if(peak >= PeakLevel4USD) return GivebackLevel4USD;
-   if(peak >= PeakLevel3USD) return GivebackLevel3USD;
-   if(peak >= PeakLevel2USD) return GivebackLevel2USD;
-   if(peak >= PeakLevel1USD) return GivebackLevel1USD;
-   return 0.0;
-}
-
-double BasketLossPercent(double basketProfit)
-{
-   if(basketProfit >= 0 || AdaptiveEquityBase <= 0)
-      return 0.0;
-   return ((-basketProfit) / AdaptiveEquityBase) * 100.0;
-}
-
-bool IsBasketFrozen(ENUM_POSITION_TYPE type)
-{
-   if(!UseBasketLossProtection)
-      return false;
-   double basketProfit = (type == POSITION_TYPE_BUY) ? BuyProfits : SellProfits;
-   if((type == POSITION_TYPE_BUY && BuyOrders <= 0) ||
-      (type == POSITION_TYPE_SELL && SellOrders <= 0))
-      return false;
-   return (BasketLossPercent(basketProfit) >= BasketFreezeLossPct);
-}
-
-double GetBasketAgeHours(ENUM_POSITION_TYPE type)
-{
-   datetime oldest = 0;
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      ulong ticket = PositionGetTicket(i);
-      if(PositionSelectByTicket(ticket) &&
-         PositionGetInteger(POSITION_MAGIC) == OrdersID &&
-         PositionGetString(POSITION_SYMBOL) == SymbolTrade &&
-         PositionGetInteger(POSITION_TYPE) == type)
-      {
-         datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
-         if(oldest == 0 || openTime < oldest)
-            oldest = openTime;
-      }
-   }
-   if(oldest == 0) return 0.0;
-   return (double)(TimeCurrent() - oldest) / 3600.0;
-}
-
-int RegimeExitScore(ENUM_POSITION_TYPE type)
-{
-   double ma0[];
-   double ma1[];
-   ArraySetAsSeries(ma0, true);
-   ArraySetAsSeries(ma1, true);
-
-   if(CopyBuffer(HandleMA, 0, 1, 1, ma0) < 1) return 0;
-   if(CopyBuffer(HandleMA, 0, 2, 1, ma1) < 1) return 0;
-
-   double price = iClose(SymbolTrade, PERIOD_CURRENT, 1);
-   if(price <= 0) return 0;
-
-   int score = 0;
-   if(type == POSITION_TYPE_BUY)
-   {
-      if(price < ma0[0]) score += 3;
-      if(ma0[0] < ma1[0]) score += 2;
-      if(price < ma1[0]) score += 1;
-   }
-   else
-   {
-      if(price > ma0[0]) score += 3;
-      if(ma0[0] > ma1[0]) score += 2;
-      if(price > ma1[0]) score += 1;
-   }
-   return score;
-}
-
-bool ConfirmRegimeExit(ENUM_POSITION_TYPE type)
-{
-   int bars = MathMax(1, RegimeConfirmBars);
-   for(int sh = 1; sh <= bars; sh++)
-   {
-      double ma0[];
-      double ma1[];
-      ArraySetAsSeries(ma0, true);
-      ArraySetAsSeries(ma1, true);
-
-      if(CopyBuffer(HandleMA, 0, sh, 1, ma0) < 1) return false;
-      if(CopyBuffer(HandleMA, 0, sh + 1, 1, ma1) < 1) return false;
-
-      double price = iClose(SymbolTrade, PERIOD_CURRENT, sh);
-      if(price <= 0) return false;
-
-      if(type == POSITION_TYPE_BUY)
-      {
-         if(!(price < ma0[0] && ma0[0] < ma1[0])) return false;
-      }
-      else
-      {
-         if(!(price > ma0[0] && ma0[0] > ma1[0])) return false;
-      }
-   }
-   return true;
-}
-
-void UpdateStatus()
-{
-   BuyOrders = 0;
-   SellOrders = 0;
-   BuyProfits = 0;
-   SellProfits = 0;
-   PriceOpenLastBuy = 0;
-   PriceOpenLastSell = 0;
-   long latestBuyTime = 0;
-   long latestSellTime = 0;
-
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      ulong ticket = PositionGetTicket(i);
-      if(PositionSelectByTicket(ticket) &&
-         PositionGetInteger(POSITION_MAGIC) == OrdersID &&
-         PositionGetString(POSITION_SYMBOL) == SymbolTrade)
-      {
-         ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
-         double p = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
-         long openTimeMsc = PositionGetInteger(POSITION_TIME_MSC);
-
-         if(type == POSITION_TYPE_BUY)
-         {
-            BuyOrders++;
-            BuyProfits += p;
-            if(openTimeMsc >= latestBuyTime)
-            {
-               latestBuyTime = openTimeMsc;
-               PriceOpenLastBuy = PositionGetDouble(POSITION_PRICE_OPEN);
-            }
-         }
-         else if(type == POSITION_TYPE_SELL)
-         {
-            SellOrders++;
-            SellProfits += p;
-            if(openTimeMsc >= latestSellTime)
-            {
-               latestSellTime = openTimeMsc;
-               PriceOpenLastSell = PositionGetDouble(POSITION_PRICE_OPEN);
-            }
-         }
-      }
-   }
-}
-
-double GetRSIValue()
-{
-   double b[];
-   ArraySetAsSeries(b, true);
-   return (CopyBuffer(HandleRSI, 0, 0, 1, b) > 0) ? b[0] : 50.0;
-}
-
-double GetMAValue()
-{
-   double b[];
-   ArraySetAsSeries(b, true);
-   return (CopyBuffer(HandleMA, 0, 0, 1, b) > 0) ? b[0] : 0.0;
-}
-
-void ExecuteTrade(ENUM_ORDER_TYPE type)
-{
-   MqlTradeRequest req = {};
-   MqlTradeResult res = {};
-   int c = (type == ORDER_TYPE_BUY) ? BuyOrders : SellOrders;
-   req.action = TRADE_ACTION_DEAL;
-   req.symbol = SymbolTrade;
-   req.magic = OrdersID;
-   req.volume = NormalizeDouble(ManualLotSize * (c + 1), 2);
-   req.type = type;
-   req.deviation = 10;
-   req.type_filling = ORDER_FILLING_IOC;
-   req.comment = CommentsOrders;
-   req.price = (type == ORDER_TYPE_BUY) ? SymbolInfoDouble(SymbolTrade, SYMBOL_ASK) : SymbolInfoDouble(SymbolTrade, SYMBOL_BID);
-   if(!OrderSend(req, res) || res.retcode != TRADE_RETCODE_DONE)
-      PrintFormat("OrderSend FAILED: retcode=%u comment=%s", res.retcode, res.comment);
-}
-
-void DisplayDashboard(double currentDrawdown, double rsi, bool IsInRecovery)
-{
-   string buyState = IsBasketFrozen(POSITION_TYPE_BUY) ? "FROZEN" : "ACTIVE";
-   string sellState = IsBasketFrozen(POSITION_TYPE_SELL) ? "FROZEN" : "ACTIVE";
-   Comment(
-      "GRID 6 V2 | v6.23\n",
-      "Balance: ", DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE),2),
-      "  Equity: ", DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY),2), "\n",
-      "DD: ", DoubleToString(currentDrawdown,2), "%",
-      "  Recovery: ", IsInRecovery ? "YES" : "NO", "\n",
-      "BUY ", BuyOrders, " / P/L ", DoubleToString(BuyProfits,2), " / ", buyState, "\n",
-      "SELL ", SellOrders, " / P/L ", DoubleToString(SellProfits,2), " / ", sellState, "\n",
-      "RSI: ", DoubleToString(rsi,1)
-   );
-}
-
-void CloseOrdersByType(ENUM_POSITION_TYPE type)
-{
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      ulong ticket = PositionGetTicket(i);
-      if(PositionSelectByTicket(ticket) &&
-         PositionGetInteger(POSITION_MAGIC) == OrdersID &&
-         PositionGetString(POSITION_SYMBOL) == SymbolTrade &&
-         PositionGetInteger(POSITION_TYPE) == type)
-      {
-         if(!trade.PositionClose(ticket))
-            PrintFormat("PositionClose failed ticket=%I64u retcode=%u", ticket, trade.ResultRetcode());
-      }
-   }
-}
-
-void CloseAllOrders()
-{
-   for(int i = PositionsTotal() - 1; i >= 0; i--)
-   {
-      ulong ticket = PositionGetTicket(i);
-      if(PositionSelectByTicket(ticket) &&
-         PositionGetInteger(POSITION_MAGIC) == OrdersID &&
-         PositionGetString(POSITION_SYMBOL) == SymbolTrade)
-      {
-         if(!trade.PositionClose(ticket))
-            PrintFormat("PositionClose failed ticket=%I64u retcode=%u", ticket, trade.ResultRetcode());
-      }
-   }
+   Comment("GRID 6 V2 | v7.00\n",
+           "Balance: ",DoubleToString(balance,2)," Equity: ",DoubleToString(equity,2),"\n",
+           "DD: ",DoubleToString(dd,2),"%  Consecutive Losses: ",ConsecutiveLosses,"\n",
+           "Regime: ",RegimeDirection());
 }
