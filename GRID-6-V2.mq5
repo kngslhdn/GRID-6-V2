@@ -2,7 +2,10 @@
 // Adaptive Equity Scaling + Hierarchical Basket Exit Protection
 #property strict
 #property copyright "Copyright 2026, Jarvis"
-#property version   "6.22"
+#property version   "6.23"
+
+#include <Trade/Trade.mqh>
+CTrade trade;
 
 //--- Enums ---
 enum Type {Open_Buy_And_Sell, Open__Only_Buy, Open__Only_Sell};
@@ -386,24 +389,29 @@ double GetBasketAgeHours(ENUM_POSITION_TYPE type)
 
 int RegimeExitScore(ENUM_POSITION_TYPE type)
 {
-   double ma0, ma1;
+   double ma0[];
+   double ma1[];
+   ArraySetAsSeries(ma0, true);
+   ArraySetAsSeries(ma1, true);
+
    if(CopyBuffer(HandleMA, 0, 1, 1, ma0) < 1) return 0;
    if(CopyBuffer(HandleMA, 0, 2, 1, ma1) < 1) return 0;
+
    double price = iClose(SymbolTrade, PERIOD_CURRENT, 1);
    if(price <= 0) return 0;
 
    int score = 0;
    if(type == POSITION_TYPE_BUY)
    {
-      if(price < ma0) score += 3;
-      if(ma0 < ma1) score += 2;
-      if(price < ma1) score += 1;
+      if(price < ma0[0]) score += 3;
+      if(ma0[0] < ma1[0]) score += 2;
+      if(price < ma1[0]) score += 1;
    }
    else
    {
-      if(price > ma0) score += 3;
-      if(ma0 > ma1) score += 2;
-      if(price > ma1) score += 1;
+      if(price > ma0[0]) score += 3;
+      if(ma0[0] > ma1[0]) score += 2;
+      if(price > ma1[0]) score += 1;
    }
    return score;
 }
@@ -413,18 +421,24 @@ bool ConfirmRegimeExit(ENUM_POSITION_TYPE type)
    int bars = MathMax(1, RegimeConfirmBars);
    for(int sh = 1; sh <= bars; sh++)
    {
-      double ma0, ma1;
+      double ma0[];
+      double ma1[];
+      ArraySetAsSeries(ma0, true);
+      ArraySetAsSeries(ma1, true);
+
       if(CopyBuffer(HandleMA, 0, sh, 1, ma0) < 1) return false;
       if(CopyBuffer(HandleMA, 0, sh + 1, 1, ma1) < 1) return false;
+
       double price = iClose(SymbolTrade, PERIOD_CURRENT, sh);
       if(price <= 0) return false;
+
       if(type == POSITION_TYPE_BUY)
       {
-         if(!(price < ma0 && ma0 < ma1)) return false;
+         if(!(price < ma0[0] && ma0[0] < ma1[0])) return false;
       }
       else
       {
-         if(!(price > ma0 && ma0 > ma1)) return false;
+         if(!(price > ma0[0] && ma0[0] > ma1[0])) return false;
       }
    }
    return true;
@@ -513,7 +527,7 @@ void DisplayDashboard(double currentDrawdown, double rsi, bool IsInRecovery)
    string buyState = IsBasketFrozen(POSITION_TYPE_BUY) ? "FROZEN" : "ACTIVE";
    string sellState = IsBasketFrozen(POSITION_TYPE_SELL) ? "FROZEN" : "ACTIVE";
    Comment(
-      "GRID 6 V2 | v6.22\n",
+      "GRID 6 V2 | v6.23\n",
       "Balance: ", DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE),2),
       "  Equity: ", DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY),2), "\n",
       "DD: ", DoubleToString(currentDrawdown,2), "%",
@@ -534,8 +548,8 @@ void CloseOrdersByType(ENUM_POSITION_TYPE type)
          PositionGetString(POSITION_SYMBOL) == SymbolTrade &&
          PositionGetInteger(POSITION_TYPE) == type)
       {
-         if(!PositionClose(ticket))
-            PrintFormat("PositionClose failed ticket=%I64u", ticket);
+         if(!trade.PositionClose(ticket))
+            PrintFormat("PositionClose failed ticket=%I64u retcode=%u", ticket, trade.ResultRetcode());
       }
    }
 }
@@ -549,7 +563,8 @@ void CloseAllOrders()
          PositionGetInteger(POSITION_MAGIC) == OrdersID &&
          PositionGetString(POSITION_SYMBOL) == SymbolTrade)
       {
-         PositionClose(ticket);
+         if(!trade.PositionClose(ticket))
+            PrintFormat("PositionClose failed ticket=%I64u retcode=%u", ticket, trade.ResultRetcode());
       }
    }
 }
