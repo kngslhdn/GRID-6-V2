@@ -1,0 +1,703 @@
+//+------------------------------------------------------------------+
+//| GRID 06.V11 - MINUS ONLY BASKET RECOVERY                       |
+//| Primary: 0.01 / 0.02 / 0.03                                    |
+//| Recovery: fixed 1.80 opposite direction                         |
+//| Recovery is armed ONLY while the primary basket is negative.   |
+//+------------------------------------------------------------------+
+#property strict
+#property version "11.00"
+
+#include <Trade/Trade.mqh>
+CTrade trade;
+
+enum Type {Open_Buy_And_Sell,Open__Only_Buy,Open__Only_Sell};
+
+//================ BASKET =================//
+input double MaxEquityLossPercent = 15.0;
+input double TargetProfitUSD      = 5.0;
+input bool   UseTrailingProfit     = true;
+input double TrailingStartUSD      = 5.0;
+input double TrailingStopUSD       = 2.0;
+
+//================ PRIMARY =================//
+input int    MAPeriod              = 200;
+input int    RSIPeriod             = 14;
+input int    RSIUpper              = 61;
+input int    RSILower              = 41;
+input Type   TypeOrdersPlace       = Open_Buy_And_Sell;
+
+// Keep the existing primary grid spacing.
+input double PointsForFirstGap     = 6250.0;
+input double GapMultiplier         = 1.30;
+input double ManualLotSize         = 0.01;
+input int    MaxOrders             = 3;
+
+//================ RECOVERY =================//
+// Recovery is deliberately NOT used when the primary basket is >= 0.
+input bool   EnableRecovery        = true;
+input double RecoveryLot           = 1.80;
+input double RecoveryGapPoints     = 6250.0;
+input bool   RecoveryOnlyWhenMinus = true;
+
+//================ HOURS =================//
+input bool   UseTradingHour        = true;
+input int    StartHour             = 7;
+input int    EndHour               = 22;
+
+//================ RISK =================//
+input int    MagicNumber           = 16082016;
+input string CommentsOrders        = "GRID 06 V11";
+
+string SymbolTrade;
+int OrdersID,HandleRSI,HandleMA;
+
+int BuyOrders,SellOrders;
+double BuyProfits,SellProfits,BuyLots,SellLots;
+double PriceOpenLastBuy,PriceOpenLastSell;
+double Buy1Price,Sell1Price,Buy3Price,Sell3Price;
+double RecoveryProfit,RecoveryLots,RecoveryEntryPrice;
+ENUM_POSITION_TYPE RecoveryType;
+
+bool RecoveryActive=false;
+bool BasketTargetReached=false;
+bool IsTerminated=false;
+double BasketPeakProfit=0.0;
+double InitialBalance=0.0;
+double HighWaterMark=0.0;
+double AdaptiveEquityBase=0.0;
+
+//+------------------------------------------------------------------+
+//| Trading hour                                                    |
+//+------------------------------------------------------------------+
+bool IsTradingHour()
+{
+   if(!UseTradingHour) return true;
+
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(),dt);
+
+   if(StartHour<EndHour)
+      return dt.hour>=StartHour && dt.hour<EndHour;
+
+   return dt.hour>=StartHour || dt.hour<EndHour;
+}
+
+//+------------------------------------------------------------------+
+//| Ownership                                                        |
+//+------------------------------------------------------------------+
+bool IsOurPosition(ulong ticket)
+{
+   if(ticket==0 || !PositionSelectByTicket(ticket)) return false;
+
+   return PositionGetInteger(POSITION_MAGIC)==OrdersID &&
+          PositionGetString(POSITION_SYMBOL)==SymbolTrade;
+}
+
+bool IsOurOrder(ulong ticket)
+{
+   if(ticket==0 || !OrderSelect(ticket)) return false;
+
+   return OrderGetInteger(ORDER_MAGIC)==OrdersID &&
+          OrderGetString(ORDER_SYMBOL)==SymbolTrade;
+}
+
+bool TradeOK()
+{
+   uint r=trade.ResultRetcode();
+   return r==TRADE_RETCODE_DONE ||
+          r==TRADE_RETCODE_DONE_PARTIAL ||
+          r==TRADE_RETCODE_PLACED;
+}
+
+//+------------------------------------------------------------------+
+//| Volume normalization                                             |
+//+------------------------------------------------------------------+
+double NormalizeVolume(double volume)
+{
+   double minLot=SymbolInfoDouble(SymbolTrade,SYMBOL_VOLUME_MIN);
+   double maxLot=SymbolInfoDouble(SymbolTrade,SYMBOL_VOLUME_MAX);
+   double step  =SymbolInfoDouble(SymbolTrade,SYMBOL_VOLUME_STEP);
+
+   if(minLot<=0) minLot=0.01;
+   if(step<=0) step=minLot;
+   if(maxLot<=0) maxLot=volume;
+
+   volume=MathMax(minLot,MathMin(maxLot,volume));
+   volume=MathFloor(volume/step+1e-9)*step;
+
+   if(volume<minLot) volume=minLot;
+
+   int digits=(step<0.01)?3:2;
+   if(step<0.001) digits=4;
+
+   return NormalizeDouble(volume,digits);
+}
+
+//+------------------------------------------------------------------+
+//| Init                                                             |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   SymbolTrade=_Symbol;
+   OrdersID=(MagicNumber==0)?101010:MagicNumber;
+
+   HandleRSI=iRSI(SymbolTrade,PERIOD_CURRENT,RSIPeriod,PRICE_CLOSE);
+   HandleMA=iMA(SymbolTrade,PERIOD_CURRENT,MAPeriod,0,MODE_SMA,PRICE_CLOSE);
+
+   InitialBalance=AccountInfoDouble(ACCOUNT_BALANCE);
+   AdaptiveEquityBase=InitialBalance;
+   HighWaterMark=InitialBalance;
+
+   trade.SetExpertMagicNumber(OrdersID);
+   trade.SetDeviationInPoints(10);
+   trade.SetTypeFillingBySymbol(SymbolTrade);
+
+   if(HandleRSI==INVALID_HANDLE || HandleMA==INVALID_HANDLE)
+      return INIT_FAILED;
+
+   // This EA needs individual hedged positions.
+   if(AccountInfoInteger(ACCOUNT_MARGIN_MODE)!=ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
+      return INIT_FAILED;
+
+   UpdateStatus();
+   return INIT_SUCCEEDED;
+}
+
+//+------------------------------------------------------------------+
+//| Deinit                                                           |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+   IndicatorRelease(HandleRSI);
+   IndicatorRelease(HandleMA);
+   Comment("");
+}
+
+//+------------------------------------------------------------------+
+//| Main                                                             |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+   if(IsTerminated || !TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
+      return;
+
+   UpdateStatus();
+
+   double balance=AccountInfoDouble(ACCOUNT_BALANCE);
+   double equity =AccountInfoDouble(ACCOUNT_EQUITY);
+
+   double locked=balance-InitialBalance;
+   if(locked<0) locked=0;
+
+   AdaptiveEquityBase=InitialBalance+locked;
+   if(balance>HighWaterMark) HighWaterMark=balance;
+
+   double dd=(equity<AdaptiveEquityBase && AdaptiveEquityBase>0)
+             ?(AdaptiveEquityBase-equity)/AdaptiveEquityBase*100.0:0.0;
+
+   if(dd>=MaxEquityLossPercent)
+   {
+      DeleteRecoveryPending();
+      CloseAllPositions();
+      IsTerminated=true;
+      return;
+   }
+
+   // Basket manager always runs, including outside entry hours.
+   ManageRecoveryPending();
+   ManageBasket();
+
+   UpdateStatus();
+
+   // Do not create new primary positions while a recovery order/position exists.
+   if(IsTradingHour() && !RecoveryActive && !HasRecoveryPending())
+   {
+      ManagePrimaryGrid();
+   }
+
+   UpdateStatus();
+   ManageRecoveryPending();
+   ManageBasket();
+   DisplayDashboard(dd);
+}
+
+//+------------------------------------------------------------------+
+//| Status                                                           |
+//+------------------------------------------------------------------+
+void UpdateStatus()
+{
+   BuyOrders=SellOrders=0;
+   BuyProfits=SellProfits=BuyLots=SellLots=0.0;
+
+   PriceOpenLastBuy=PriceOpenLastSell=0.0;
+   Buy1Price=Sell1Price=Buy3Price=Sell3Price=0.0;
+
+   RecoveryProfit=RecoveryLots=RecoveryEntryPrice=0.0;
+   RecoveryActive=false;
+   RecoveryType=WRONG_VALUE;
+
+   datetime latestBuy=0,latestSell=0,firstBuy=0,firstSell=0;
+
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong ticket=PositionGetTicket(i);
+      if(!IsOurPosition(ticket)) continue;
+
+      ENUM_POSITION_TYPE type=(ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      double profit=PositionGetDouble(POSITION_PROFIT)+PositionGetDouble(POSITION_SWAP);
+      double lots=PositionGetDouble(POSITION_VOLUME);
+      double open=PositionGetDouble(POSITION_PRICE_OPEN);
+      datetime openTime=(datetime)PositionGetInteger(POSITION_TIME);
+      string comment=PositionGetString(POSITION_COMMENT);
+
+      bool recovery=StringFind(comment,"RECOVERY BUY")>=0 ||
+                    StringFind(comment,"RECOVERY SELL")>=0;
+
+      if(recovery)
+      {
+         RecoveryActive=true;
+         RecoveryProfit+=profit;
+         RecoveryLots+=lots;
+         RecoveryEntryPrice=open;
+         RecoveryType=type;
+         continue;
+      }
+
+      if(type==POSITION_TYPE_BUY)
+      {
+         BuyOrders++;
+         BuyProfits+=profit;
+         BuyLots+=lots;
+
+         if(openTime>=latestBuy)
+         {
+            latestBuy=openTime;
+            PriceOpenLastBuy=open;
+         }
+
+         if(openTime<=firstBuy || firstBuy==0)
+         {
+            firstBuy=openTime;
+            Buy1Price=open;
+         }
+
+         if(StringFind(comment,"PRIMARY BUY 3")>=0)
+            Buy3Price=open;
+      }
+      else if(type==POSITION_TYPE_SELL)
+      {
+         SellOrders++;
+         SellProfits+=profit;
+         SellLots+=lots;
+
+         if(openTime>=latestSell)
+         {
+            latestSell=openTime;
+            PriceOpenLastSell=open;
+         }
+
+         if(openTime<=firstSell || firstSell==0)
+         {
+            firstSell=openTime;
+            Sell1Price=open;
+         }
+
+         if(StringFind(comment,"PRIMARY SELL 3")>=0)
+            Sell3Price=open;
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Total basket profit                                              |
+//+------------------------------------------------------------------+
+double BasketProfit()
+{
+   return BuyProfits+SellProfits+RecoveryProfit;
+}
+
+//+------------------------------------------------------------------+
+//| Recovery pending detection                                       |
+//+------------------------------------------------------------------+
+bool HasRecoveryPending()
+{
+   for(int i=OrdersTotal()-1;i>=0;i--)
+   {
+      ulong ticket=OrderGetTicket(i);
+      if(!IsOurOrder(ticket)) continue;
+
+      string comment=OrderGetString(ORDER_COMMENT);
+
+      if(StringFind(comment,"RECOVERY BUY")>=0 ||
+         StringFind(comment,"RECOVERY SELL")>=0)
+         return true;
+   }
+
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| Delete recovery pending                                          |
+//+------------------------------------------------------------------+
+void DeleteRecoveryPending()
+{
+   for(int i=OrdersTotal()-1;i>=0;i--)
+   {
+      ulong ticket=OrderGetTicket(i);
+      if(!IsOurOrder(ticket)) continue;
+
+      string comment=OrderGetString(ORDER_COMMENT);
+
+      if(StringFind(comment,"RECOVERY BUY")<0 &&
+         StringFind(comment,"RECOVERY SELL")<0)
+         continue;
+
+      if(!trade.OrderDelete(ticket))
+         PrintFormat("V11 recovery pending delete failed ticket=%I64u retcode=%u",
+                     ticket,trade.ResultRetcode());
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Recovery engine                                                  |
+//|                                                                  |
+//| Example requested by user:                                      |
+//| SELL 1 = 0.01                                                    |
+//| SELL 2 = 0.02                                                    |
+//| SELL 3 = 0.03                                                    |
+//| basket < 0                                                        |
+//| -> BUY STOP 1.80 at recovery gap                                |
+//|                                                                  |
+//| Mirror logic applies to BUY basket -> SELL STOP 1.80.            |
+//+------------------------------------------------------------------+
+void ManageRecoveryPending()
+{
+   UpdateStatus();
+
+   if(!EnableRecovery) return;
+   if(RecoveryActive) return;
+
+   bool pending=HasRecoveryPending();
+   double basket=BasketProfit();
+
+   // CRITICAL RULE: recovery is a MINUS-ONLY mechanism.
+   // If basket is zero/profit, recovery must not exist.
+   if(RecoveryOnlyWhenMinus && basket>=0.0)
+   {
+      if(pending) DeleteRecoveryPending();
+      return;
+   }
+
+   if(pending) return;
+   if(!IsTradingHour()) return;
+
+   ENUM_POSITION_TYPE primary=WRONG_VALUE;
+
+   if(BuyOrders>=MaxOrders && SellOrders==0 && BuyProfits<0.0)
+      primary=POSITION_TYPE_BUY;
+   else if(SellOrders>=MaxOrders && BuyOrders==0 && SellProfits<0.0)
+      primary=POSITION_TYPE_SELL;
+   else
+      return;
+
+   // Re-check total basket. Recovery is not allowed to be armed while profitable.
+   basket=BasketProfit();
+   if(RecoveryOnlyWhenMinus && basket>=0.0)
+      return;
+
+   double volume=NormalizeVolume(RecoveryLot);
+   if(volume<=0.0) return;
+
+   double point=SymbolInfoDouble(SymbolTrade,SYMBOL_POINT);
+   int digits=(int)SymbolInfoInteger(SymbolTrade,SYMBOL_DIGITS);
+
+   double gap=RecoveryGapPoints*point;
+   if(gap<=0.0) return;
+
+   // Respect the broker minimum stop distance without changing the configured 6250
+   // gap when 6250 is already valid.
+   int stopLevel=(int)SymbolInfoInteger(SymbolTrade,SYMBOL_TRADE_STOPS_LEVEL);
+   double minGap=stopLevel*point;
+   if(gap<minGap) gap=minGap+point;
+
+   ENUM_ORDER_TYPE orderType;
+   double price;
+   string comment;
+   bool ok=false;
+
+   if(primary==POSITION_TYPE_SELL)
+   {
+      orderType=ORDER_TYPE_BUY_STOP;
+      price=NormalizeDouble(SymbolInfoDouble(SymbolTrade,SYMBOL_ASK)+gap,digits);
+      comment=CommentsOrders+" RECOVERY BUY";
+
+      trade.SetExpertMagicNumber(OrdersID);
+      trade.SetTypeFillingBySymbol(SymbolTrade);
+      ok=trade.BuyStop(volume,price,SymbolTrade,0,0,ORDER_TIME_GTC,0,comment);
+   }
+   else if(primary==POSITION_TYPE_BUY)
+   {
+      orderType=ORDER_TYPE_SELL_STOP;
+      price=NormalizeDouble(SymbolInfoDouble(SymbolTrade,SYMBOL_BID)-gap,digits);
+      comment=CommentsOrders+" RECOVERY SELL";
+
+      trade.SetExpertMagicNumber(OrdersID);
+      trade.SetTypeFillingBySymbol(SymbolTrade);
+      ok=trade.SellStop(volume,price,SymbolTrade,0,0,ORDER_TIME_GTC,0,comment);
+   }
+   else
+      return;
+
+   if(ok && TradeOK())
+   {
+      PrintFormat("V11 RECOVERY ARMED | primary=%s | basket=%.2f | lot=%.2f | gap=%.0f points | price=%.*f",
+                  primary==POSITION_TYPE_SELL?"SELL":"BUY",
+                  basket,volume,RecoveryGapPoints,digits,price);
+   }
+   else
+   {
+      PrintFormat("V11 RECOVERY ARM FAILED | basket=%.2f | lot=%.2f | retcode=%u | %s",
+                  basket,volume,trade.ResultRetcode(),trade.ResultRetcodeDescription());
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Primary grid                                                    |
+//+------------------------------------------------------------------+
+void ManagePrimaryGrid()
+{
+   UpdateStatus();
+
+   if(BuyOrders>0 && BuyOrders<MaxOrders)
+   {
+      double gap=PointsForFirstGap*MathPow(GapMultiplier,BuyOrders-1);
+      double ask=SymbolInfoDouble(SymbolTrade,SYMBOL_ASK);
+
+      if(ask<=PriceOpenLastBuy-gap*SymbolInfoDouble(SymbolTrade,SYMBOL_POINT))
+         ExecutePrimary(ORDER_TYPE_BUY);
+   }
+
+   UpdateStatus();
+
+   if(SellOrders>0 && SellOrders<MaxOrders)
+   {
+      double gap=PointsForFirstGap*MathPow(GapMultiplier,SellOrders-1);
+      double bid=SymbolInfoDouble(SymbolTrade,SYMBOL_BID);
+
+      if(bid>=PriceOpenLastSell+gap*SymbolInfoDouble(SymbolTrade,SYMBOL_POINT))
+         ExecutePrimary(ORDER_TYPE_SELL);
+   }
+
+   UpdateStatus();
+
+   // Start a fresh primary cycle only when there is no basket.
+   if(BuyOrders==0 && SellOrders==0 && !RecoveryActive && !HasRecoveryPending())
+   {
+      double r=GetRSI();
+      double m=GetMA();
+      double p=SymbolInfoDouble(SymbolTrade,SYMBOL_BID);
+
+      bool buySignal=false;
+      bool sellSignal=false;
+
+      int lo=RSILower;
+      int hi=RSIUpper;
+
+      double balance=AccountInfoDouble(ACCOUNT_BALANCE);
+      if(balance<HighWaterMark)
+      {
+         lo-=5;
+         hi+=5;
+      }
+
+      if(TypeOrdersPlace!=Open__Only_Sell && p>m && r<lo)
+         buySignal=true;
+
+      if(TypeOrdersPlace!=Open__Only_Buy && p<m && r>hi)
+         sellSignal=true;
+
+      if(buySignal) ExecutePrimary(ORDER_TYPE_BUY);
+      else if(sellSignal) ExecutePrimary(ORDER_TYPE_SELL);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Execute primary                                                 |
+//+------------------------------------------------------------------+
+bool ExecutePrimary(ENUM_ORDER_TYPE type)
+{
+   int count=(type==ORDER_TYPE_BUY)?BuyOrders:SellOrders;
+
+   if(count>=MaxOrders) return false;
+
+   // 0.01 -> 0.02 -> 0.03.
+   double volume=NormalizeVolume(ManualLotSize*(count+1));
+   if(volume<=0.0) return false;
+
+   trade.SetExpertMagicNumber(OrdersID);
+   trade.SetTypeFillingBySymbol(SymbolTrade);
+
+   string comment=(type==ORDER_TYPE_BUY)
+                  ?StringFormat("%s PRIMARY BUY %d",CommentsOrders,count+1)
+                  :StringFormat("%s PRIMARY SELL %d",CommentsOrders,count+1);
+
+   bool ok=(type==ORDER_TYPE_BUY)
+           ?trade.Buy(volume,SymbolTrade,0,0,0,comment)
+           :trade.Sell(volume,SymbolTrade,0,0,0,comment);
+
+   if(!ok || !TradeOK())
+   {
+      PrintFormat("V11 PRIMARY OPEN FAILED | type=%s | lot=%.2f | retcode=%u | %s",
+                  type==ORDER_TYPE_BUY?"BUY":"SELL",
+                  volume,trade.ResultRetcode(),trade.ResultRetcodeDescription());
+      return false;
+   }
+
+   return true;
+}
+
+//+------------------------------------------------------------------+
+//| Basket manager                                                   |
+//|                                                                  |
+//| Target is NOT an instant close anymore.                         |
+//|                                                                  |
+//| 1. Basket reaches TargetProfitUSD.                               |
+//| 2. Trailing becomes armed.                                       |
+//| 3. Peak basket profit is tracked.                                |
+//| 4. Pullback >= TrailingStopUSD -> CLOSE ALL.                     |
+//|                                                                  |
+//| This makes primary + recovery a single basket.                   |
+//+------------------------------------------------------------------+
+void ManageBasket()
+{
+   UpdateStatus();
+
+   double basket=BasketProfit();
+   bool hasBasket=(BuyOrders+SellOrders>0 || RecoveryActive || HasRecoveryPending());
+
+   if(!hasBasket)
+   {
+      BasketTargetReached=false;
+      BasketPeakProfit=0.0;
+      return;
+   }
+
+   // If a recovery pending exists but the primary basket has recovered to >= 0,
+   // remove the recovery order. It is forbidden to interfere with a profitable basket.
+   if(!RecoveryActive && HasRecoveryPending() && RecoveryOnlyWhenMinus && basket>=0.0)
+      DeleteRecoveryPending();
+
+   // Target reached = arm trailing, not instant close.
+   if(!BasketTargetReached && basket>=TargetProfitUSD)
+   {
+      BasketTargetReached=true;
+      BasketPeakProfit=basket;
+
+      // Once target is reached, no new recovery order is allowed.
+      DeleteRecoveryPending();
+   }
+
+   if(BasketTargetReached)
+   {
+      if(basket>BasketPeakProfit)
+         BasketPeakProfit=basket;
+
+      if(!UseTrailingProfit)
+      {
+         CloseAllPositions();
+         BasketTargetReached=false;
+         BasketPeakProfit=0.0;
+         return;
+      }
+
+      if(BasketPeakProfit>0.0 &&
+         basket<=BasketPeakProfit-TrailingStopUSD)
+      {
+         PrintFormat("V11 BASKET TRAILING CLOSE | peak=%.2f | current=%.2f | trail=%.2f",
+                     BasketPeakProfit,basket,TrailingStopUSD);
+
+         DeleteRecoveryPending();
+         CloseAllPositions();
+         BasketTargetReached=false;
+         BasketPeakProfit=0.0;
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Close all positions                                              |
+//+------------------------------------------------------------------+
+void CloseAllPositions()
+{
+   for(int i=PositionsTotal()-1;i>=0;i--)
+   {
+      ulong ticket=PositionGetTicket(i);
+      if(!IsOurPosition(ticket)) continue;
+
+      if(!trade.PositionClose(ticket))
+      {
+         PrintFormat("V11 CLOSE FAILED ticket=%I64u retcode=%u | %s",
+                     ticket,trade.ResultRetcode(),trade.ResultRetcodeDescription());
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Indicators                                                       |
+//+------------------------------------------------------------------+
+double GetRSI()
+{
+   double buffer[];
+   ArraySetAsSeries(buffer,true);
+
+   return CopyBuffer(HandleRSI,0,0,1,buffer)>0?buffer[0]:50.0;
+}
+
+double GetMA()
+{
+   double buffer[];
+   ArraySetAsSeries(buffer,true);
+
+   return CopyBuffer(HandleMA,0,0,1,buffer)>0?buffer[0]:0.0;
+}
+
+//+------------------------------------------------------------------+
+//| Dashboard                                                        |
+//+------------------------------------------------------------------+
+void DisplayDashboard(double dd)
+{
+   double basket=BasketProfit();
+   string state="IDLE";
+
+   if(RecoveryActive)
+      state="RECOVERY ACTIVE";
+   else if(HasRecoveryPending())
+      state="RECOVERY ARMED";
+   else if(BuyOrders+SellOrders>0)
+      state="PRIMARY BASKET";
+
+   if(BasketTargetReached)
+      state="BASKET TRAILING";
+
+   Comment(
+      "===== GRID 06 V11 =====\n",
+      "State: ",state,"\n",
+      "Basket P/L: ",DoubleToString(basket,2),"\n",
+      "Target: ",DoubleToString(TargetProfitUSD,2),
+      " | Peak: ",DoubleToString(BasketPeakProfit,2),"\n",
+      "Trail: ",DoubleToString(TrailingStartUSD,2),
+      "/",DoubleToString(TrailingStopUSD,2),"\n",
+      "BUY: ",BuyOrders," lots=",DoubleToString(BuyLots,2),
+      " P/L=",DoubleToString(BuyProfits,2),"\n",
+      "SELL: ",SellOrders," lots=",DoubleToString(SellLots,2),
+      " P/L=",DoubleToString(SellProfits,2),"\n",
+      "RECOVERY: ",RecoveryActive?"ACTIVE":"OFF",
+      " lot=",DoubleToString(RecoveryLots,2),
+      " P/L=",DoubleToString(RecoveryProfit,2),"\n",
+      "R1 Lot: ",DoubleToString(RecoveryLot,2),
+      " | Gap: ",DoubleToString(RecoveryGapPoints,0)," pts\n",
+      "Primary Gap: ",DoubleToString(PointsForFirstGap,0),
+      " x ",DoubleToString(GapMultiplier,2),"\n",
+      "DD: ",DoubleToString(dd,2),"%"
+   );
+}
