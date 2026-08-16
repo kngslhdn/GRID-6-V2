@@ -1,0 +1,940 @@
+//================================================================================================//
+// Expert Advisor: GRID 06.V03 - BASKET HEDGE & RECOVERY EDITION 2026
+// Base: GRID 06.V02 - RECOVERY & GROWTH EDITION 2026
+//
+// V03 CHANGE:
+// - Preserve the original GRID 06.V02 grid engine.
+// - When a basket reaches MaxOrders and price continues against it, open the opposite side
+//   as a NEW basket instead of closing the old basket.
+// - Every basket has its own identity, profit target and trailing-profit state.
+// - A profitable hedge basket can close independently while the old basket remains open.
+// - After the hedge basket closes, another hedge basket may be created while the old basket
+//   is still waiting for recovery.
+//================================================================================================//
+#property strict
+#property copyright "Copyright 2026, Jarvis"
+#property version   "7.00"
+
+//--- Enums ---
+enum Type {Open_Buy_And_Sell, Open__Only_Buy, Open__Only_Sell};
+
+//--- Input Parameters ---
+input string SafeParameters        = "||========== SAFETY & RECOVERY ==========||";
+input double MaxEquityLossPercent  = 15.0;
+input bool   UseTrailingProfit     = true;
+input double TrailingStartUSD      = 5.0;
+input double TrailingStopUSD       = 2.0;
+
+input string RSI_Settings          = "||========== INDICATORS ==========||";
+input int    MAPeriod              = 200;
+input int    RSIPeriod             = 14;
+input int    RSIUpper              = 61;
+input int    RSILower              = 41;
+
+input string Grid_Settings         = "||========== GRID LOGIC ==========||";
+input Type   TypeOrdersPlace       = Open_Buy_And_Sell;
+input double PointsForFirstGap     = 6250.0;
+input double GapMultiplier         = 1.3;
+input double TargetProfitUSD       = 5.0;
+input double ManualLotSize         = 0.01;
+input int    MaxOrders             = 3;
+input int    MagicNumber           = 16082016;
+input string CommentsOrders        = "GRID 3 Buy Sell";
+
+//--- Basket Hedge Settings ---
+input string BasketSettings        = "||========== BASKET HEDGE ENGINE V03 ==========||";
+input bool   UseBasketHedge        = true;
+input int    BasketTriggerOrders   = 3;
+input double HedgeTriggerPoints    = 6250.0;
+input double RecoveryTargetBonusUSD= 2.0;
+input int    MaxBasketCount        = 20;
+input bool   ProtectOldBaskets     = true;
+input int    BasketReentryMinutes  = 1;
+
+//--- Trading Hour ---
+input string TradingHourSettings   = "||========== TRADING HOURS ==========||";
+input bool   UseTradingHour        = true;
+input int    StartHour             = 7;
+input int    EndHour               = 22;
+
+//--- Global Variables ---
+string SymbolTrade;
+int    OrdersID, HandleRSI, HandleMA;
+int    BuyOrders, SellOrders;
+double BuyProfits, SellProfits;
+double PriceOpenLastBuy, PriceOpenLastSell;
+
+bool   IsTerminated = false;
+double HighWaterMark = 0;
+
+double InitialBalance     = 0;
+double AdaptiveEquityBase = 0;
+double LockedProfit       = 0;
+
+datetime LastBasketOpenTime = 0;
+ulong NextBasketId = 1;
+
+//--- Basket trailing state ---
+ulong  BasketStateId[100];
+double BasketPeakProfit[100];
+int    BasketStateCount = 0;
+
+//================================================================================================//
+bool IsTradingHour()
+{
+   if(!UseTradingHour)
+      return true;
+
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+
+   int hour = dt.hour;
+
+   if(StartHour < EndHour)
+      return (hour >= StartHour && hour < EndHour);
+   else
+      return (hour >= StartHour || hour < EndHour);
+}
+
+//================================================================================================//
+bool IsOurPosition(ulong ticket)
+{
+   if(ticket == 0 || !PositionSelectByTicket(ticket))
+      return false;
+
+   return PositionGetInteger(POSITION_MAGIC) == OrdersID
+      && PositionGetString(POSITION_SYMBOL) == SymbolTrade;
+}
+
+//================================================================================================//
+ulong ParseBasketId(string comment)
+{
+   int p = StringFind(comment, "|B");
+   if(p < 0)
+      return 0;
+
+   int start = p + 2;
+   int end = StringFind(comment, "|", start);
+   if(end < 0)
+      end = StringLen(comment);
+
+   string idText = StringSubstr(comment, start, end - start);
+   if(idText == "")
+      return 0;
+
+   return (ulong)StringToInteger(idText);
+}
+
+//================================================================================================//
+int ParseBasketDirection(string comment)
+{
+   if(StringFind(comment, "|BUY") >= 0)
+      return 1;
+   if(StringFind(comment, "|SELL") >= 0)
+      return -1;
+   return 0;
+}
+
+//================================================================================================//
+string BasketComment(ulong basketId, int direction)
+{
+   return StringFormat("G06V3|B%I64u|%s", basketId, direction > 0 ? "BUY" : "SELL");
+}
+
+//================================================================================================//
+void RegisterBasketState(ulong basketId)
+{
+   if(basketId == 0)
+      return;
+
+   for(int i = 0; i < BasketStateCount; i++)
+   {
+      if(BasketStateId[i] == basketId)
+         return;
+   }
+
+   if(BasketStateCount >= 100)
+      return;
+
+   BasketStateId[BasketStateCount] = basketId;
+   BasketPeakProfit[BasketStateCount] = 0.0;
+   BasketStateCount++;
+}
+
+//================================================================================================//
+int FindBasketState(ulong basketId)
+{
+   for(int i = 0; i < BasketStateCount; i++)
+   {
+      if(BasketStateId[i] == basketId)
+         return i;
+   }
+   return -1;
+}
+
+//================================================================================================//
+void RemoveBasketState(ulong basketId)
+{
+   int idx = FindBasketState(basketId);
+   if(idx < 0)
+      return;
+
+   for(int i = idx; i < BasketStateCount - 1; i++)
+   {
+      BasketStateId[i] = BasketStateId[i + 1];
+      BasketPeakProfit[i] = BasketPeakProfit[i + 1];
+   }
+
+   BasketStateCount--;
+}
+
+//================================================================================================//
+void RecoverBasketSequence()
+{
+   ulong maxId = 0;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(!IsOurPosition(ticket))
+         continue;
+
+      ulong id = ParseBasketId(PositionGetString(POSITION_COMMENT));
+      if(id > 0)
+      {
+         RegisterBasketState(id);
+         if(id > maxId)
+            maxId = id;
+      }
+   }
+
+   if(maxId >= NextBasketId)
+      NextBasketId = maxId + 1;
+}
+
+//================================================================================================//
+ulong CreateBasketId()
+{
+   if(NextBasketId == 0)
+      NextBasketId = 1;
+
+   ulong id = NextBasketId++;
+   RegisterBasketState(id);
+   return id;
+}
+
+//================================================================================================//
+void GetBasketStats(ulong basketId, int &direction, int &count, double &profit, double &lastPrice)
+{
+   direction = 0;
+   count = 0;
+   profit = 0.0;
+   lastPrice = 0.0;
+
+   datetime latestTime = 0;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(!IsOurPosition(ticket))
+         continue;
+
+      string comment = PositionGetString(POSITION_COMMENT);
+      ulong id = ParseBasketId(comment);
+      if(id != basketId)
+         continue;
+
+      int d = ParseBasketDirection(comment);
+      if(direction == 0)
+         direction = d;
+
+      count++;
+      profit += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+
+      datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
+      if(openTime >= latestTime)
+      {
+         latestTime = openTime;
+         lastPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+      }
+   }
+}
+
+//================================================================================================//
+bool BasketExistsDirection(int direction)
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(!IsOurPosition(ticket))
+         continue;
+
+      int d = ParseBasketDirection(PositionGetString(POSITION_COMMENT));
+      if(d == direction && ParseBasketId(PositionGetString(POSITION_COMMENT)) > 0)
+         return true;
+   }
+   return false;
+}
+
+//================================================================================================//
+bool GetLatestBasket(int direction, ulong &basketId, int &count, double &profit, double &lastPrice)
+{
+   basketId = 0;
+   count = 0;
+   profit = 0.0;
+   lastPrice = 0.0;
+
+   ulong latestId = 0;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(!IsOurPosition(ticket))
+         continue;
+
+      string comment = PositionGetString(POSITION_COMMENT);
+      ulong id = ParseBasketId(comment);
+      int d = ParseBasketDirection(comment);
+
+      if(id > 0 && d == direction && id > latestId)
+         latestId = id;
+   }
+
+   if(latestId == 0)
+      return false;
+
+   int foundDirection = 0;
+   GetBasketStats(latestId, foundDirection, count, profit, lastPrice);
+   basketId = latestId;
+   return count > 0;
+}
+
+//================================================================================================//
+bool IsRecoveryMode()
+{
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   return balance < HighWaterMark;
+}
+
+//================================================================================================//
+int GetBasketTarget(double recovery)
+{
+   return (int)MathMax(0.0, TargetProfitUSD + (recovery ? RecoveryTargetBonusUSD : 0.0));
+}
+
+//================================================================================================//
+void ManageBasketExit(ulong basketId, bool recovery)
+{
+   int direction, count;
+   double profit, lastPrice;
+   GetBasketStats(basketId, direction, count, profit, lastPrice);
+
+   if(count <= 0)
+   {
+      RemoveBasketState(basketId);
+      return;
+   }
+
+   RegisterBasketState(basketId);
+   int state = FindBasketState(basketId);
+   double target = TargetProfitUSD + (recovery ? RecoveryTargetBonusUSD : 0.0);
+
+   // Every basket is managed independently. An old losing basket is NOT closed merely
+   // because a newer opposite basket exists.
+   if(profit >= target)
+   {
+      CloseOrdersByBasket(basketId);
+      return;
+   }
+
+   if(!UseTrailingProfit || state < 0)
+      return;
+
+   if(profit >= TrailingStartUSD && profit > BasketPeakProfit[state])
+      BasketPeakProfit[state] = profit;
+
+   if(BasketPeakProfit[state] >= TrailingStartUSD &&
+      profit <= BasketPeakProfit[state] - TrailingStopUSD)
+   {
+      CloseOrdersByBasket(basketId);
+   }
+}
+
+//================================================================================================//
+void ManageAllBaskets(bool recovery)
+{
+   ulong ids[100];
+   int total = 0;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(!IsOurPosition(ticket))
+         continue;
+
+      ulong id = ParseBasketId(PositionGetString(POSITION_COMMENT));
+      if(id == 0)
+         continue;
+
+      bool exists = false;
+      for(int j = 0; j < total; j++)
+      {
+         if(ids[j] == id)
+         {
+            exists = true;
+            break;
+         }
+      }
+
+      if(!exists && total < 100)
+         ids[total++] = id;
+   }
+
+   for(int i = 0; i < total; i++)
+      ManageBasketExit(ids[i], recovery);
+}
+
+//================================================================================================//
+int CountOpenPositions()
+{
+   int total = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(IsOurPosition(ticket))
+         total++;
+   }
+   return total;
+}
+
+//================================================================================================//
+int OnInit()
+{
+   SymbolTrade = _Symbol;
+
+   OrdersID = (MagicNumber == 0)
+      ? 101010
+      : MagicNumber;
+
+   HandleRSI = iRSI(SymbolTrade, PERIOD_CURRENT, RSIPeriod, PRICE_CLOSE);
+   HandleMA  = iMA(SymbolTrade, PERIOD_CURRENT, MAPeriod, 0, MODE_SMA, PRICE_CLOSE);
+
+   HighWaterMark = AccountInfoDouble(ACCOUNT_BALANCE);
+   InitialBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+   AdaptiveEquityBase = InitialBalance;
+   LockedProfit = 0;
+   NextBasketId = 1;
+   LastBasketOpenTime = 0;
+   BasketStateCount = 0;
+
+   RecoverBasketSequence();
+
+   if(HandleRSI == INVALID_HANDLE || HandleMA == INVALID_HANDLE)
+   {
+      Print("Gagal inisialisasi indikator!");
+      return(INIT_FAILED);
+   }
+
+   Print("GRID 06.V03 initialized. Basket Hedge Engine ENABLED.");
+   Print("IMPORTANT: V03 requires an MT5 hedging account for independent BUY/SELL baskets.");
+
+   return(INIT_SUCCEEDED);
+}
+
+//================================================================================================//
+void OnDeinit(const int reason)
+{
+   if(HandleRSI != INVALID_HANDLE)
+      IndicatorRelease(HandleRSI);
+   if(HandleMA != INVALID_HANDLE)
+      IndicatorRelease(HandleMA);
+   Comment("");
+}
+
+//================================================================================================//
+void OnTick()
+{
+   if(IsTerminated
+      || !TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)
+      || !IsTradingHour())
+      return;
+
+   UpdateStatus();
+
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   double equity  = AccountInfoDouble(ACCOUNT_EQUITY);
+
+   LockedProfit = balance - InitialBalance;
+   if(LockedProfit < 0)
+      LockedProfit = 0;
+
+   AdaptiveEquityBase = InitialBalance + LockedProfit;
+
+   if(balance > HighWaterMark)
+      HighWaterMark = balance;
+
+   bool IsInRecovery = (balance < HighWaterMark);
+
+   double currentDrawdown = 0;
+   if(equity < AdaptiveEquityBase && AdaptiveEquityBase > 0)
+   {
+      currentDrawdown =
+         ((AdaptiveEquityBase - equity) / AdaptiveEquityBase) * 100.0;
+   }
+
+   if(currentDrawdown >= MaxEquityLossPercent)
+   {
+      PrintFormat("!!! EMERGENCY CUT LOSS: Drawdown %.2f%% !!!", currentDrawdown);
+      CloseAllOrders();
+      IsTerminated = true;
+      return;
+   }
+
+   //========================================================
+   // EXIT FIRST: each basket is independent.
+   //========================================================
+   ManageAllBaskets(IsInRecovery);
+
+   // Refresh after basket closures.
+   UpdateStatus();
+
+   double rsi   = GetRSIValue();
+   double ma    = GetMAValue();
+   double priceBid = SymbolInfoDouble(SymbolTrade, SYMBOL_BID);
+   double priceAsk = SymbolInfoDouble(SymbolTrade, SYMBOL_ASK);
+
+   int lowRSI  = IsInRecovery ? (RSILower - 5) : RSILower;
+   int highRSI = IsInRecovery ? (RSIUpper + 5) : RSIUpper;
+
+   //========================================================
+   // ORIGINAL FIRST-ENTRY LOGIC
+   // Only create a NEW basket if that direction has no basket.
+   //========================================================
+   if(!BasketExistsDirection(1) &&
+      (TypeOrdersPlace == Open_Buy_And_Sell || TypeOrdersPlace == Open__Only_Buy))
+   {
+      if(priceBid > ma && rsi < lowRSI)
+      {
+         ulong basketId = CreateBasketId();
+         ExecuteTrade(ORDER_TYPE_BUY, basketId);
+      }
+   }
+
+   if(!BasketExistsDirection(-1) &&
+      (TypeOrdersPlace == Open_Buy_And_Sell || TypeOrdersPlace == Open__Only_Sell))
+   {
+      if(priceBid < ma && rsi > highRSI)
+      {
+         ulong basketId = CreateBasketId();
+         ExecuteTrade(ORDER_TYPE_SELL, basketId);
+      }
+   }
+
+   //========================================================
+   // ORIGINAL GRID RECOVERY, BUT PER LATEST BASKET.
+   // Old baskets are not counted against a newer basket.
+   //========================================================
+   ulong buyBasketId;
+   int buyCount;
+   double buyProfit, lastBuyPrice;
+
+   if(GetLatestBasket(1, buyBasketId, buyCount, buyProfit, lastBuyPrice))
+   {
+      if(buyCount < MaxOrders)
+      {
+         double gap = PointsForFirstGap * MathPow(GapMultiplier, buyCount - 1);
+
+         if(priceAsk <= lastBuyPrice - (gap * _Point))
+            ExecuteTrade(ORDER_TYPE_BUY, buyBasketId);
+      }
+   }
+
+   ulong sellBasketId;
+   int sellCount;
+   double sellProfit, lastSellPrice;
+
+   if(GetLatestBasket(-1, sellBasketId, sellCount, sellProfit, lastSellPrice))
+   {
+      if(sellCount < MaxOrders)
+      {
+         double gap = PointsForFirstGap * MathPow(GapMultiplier, sellCount - 1);
+
+         if(priceBid >= lastSellPrice + (gap * _Point))
+            ExecuteTrade(ORDER_TYPE_SELL, sellBasketId);
+      }
+   }
+
+   //========================================================
+   // V03 BASKET HEDGE TRIGGER
+   // If the latest basket is full and market continues against it,
+   // create an opposite basket. The old basket remains untouched.
+   //========================================================
+   if(UseBasketHedge && BasketTriggerOrders > 0)
+   {
+      bool cooldownOK = (BasketReentryMinutes <= 0 ||
+                         TimeCurrent() - LastBasketOpenTime >= BasketReentryMinutes * 60);
+
+      if(cooldownOK)
+      {
+         ulong latestBuyId;
+         int latestBuyCount;
+         double latestBuyProfit, latestBuyPrice;
+
+         if(GetLatestBasket(1, latestBuyId, latestBuyCount, latestBuyProfit, latestBuyPrice) &&
+            latestBuyCount >= BasketTriggerOrders &&
+            !BasketExistsDirection(-1))
+         {
+            double hedgeGap = HedgeTriggerPoints > 0
+               ? HedgeTriggerPoints
+               : PointsForFirstGap * MathPow(GapMultiplier, MathMax(0, BasketTriggerOrders - 1));
+
+            if(priceAsk <= latestBuyPrice - hedgeGap * _Point)
+            {
+               ulong newBasket = CreateBasketId();
+               ExecuteTrade(ORDER_TYPE_SELL, newBasket);
+            }
+         }
+
+         ulong latestSellId;
+         int latestSellCount;
+         double latestSellProfit, latestSellPrice;
+
+         if(GetLatestBasket(-1, latestSellId, latestSellCount, latestSellProfit, latestSellPrice) &&
+            latestSellCount >= BasketTriggerOrders &&
+            !BasketExistsDirection(1))
+         {
+            double hedgeGap = HedgeTriggerPoints > 0
+               ? HedgeTriggerPoints
+               : PointsForFirstGap * MathPow(GapMultiplier, MathMax(0, BasketTriggerOrders - 1));
+
+            if(priceBid >= latestSellPrice + hedgeGap * _Point)
+            {
+               ulong newBasket = CreateBasketId();
+               ExecuteTrade(ORDER_TYPE_BUY, newBasket);
+            }
+         }
+      }
+   }
+
+   DisplayDashboard(currentDrawdown, rsi, IsInRecovery);
+}
+
+//================================================================================================//
+void UpdateStatus()
+{
+   BuyOrders   = 0;
+   SellOrders  = 0;
+   BuyProfits  = 0;
+   SellProfits = 0;
+   PriceOpenLastBuy = 0;
+   PriceOpenLastSell = 0;
+
+   datetime latestBuyTime = 0;
+   datetime latestSellTime = 0;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(!IsOurPosition(ticket))
+         continue;
+
+      ENUM_POSITION_TYPE type =
+         (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+      double p = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+      datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
+
+      if(type == POSITION_TYPE_BUY)
+      {
+         BuyOrders++;
+         BuyProfits += p;
+         if(openTime >= latestBuyTime)
+         {
+            latestBuyTime = openTime;
+            PriceOpenLastBuy = PositionGetDouble(POSITION_PRICE_OPEN);
+         }
+      }
+      else
+      {
+         SellOrders++;
+         SellProfits += p;
+         if(openTime >= latestSellTime)
+         {
+            latestSellTime = openTime;
+            PriceOpenLastSell = PositionGetDouble(POSITION_PRICE_OPEN);
+         }
+      }
+   }
+}
+
+//================================================================================================//
+double GetRSIValue()
+{
+   double b[];
+   ArraySetAsSeries(b, true);
+
+   return (CopyBuffer(HandleRSI, 0, 0, 1, b) > 0)
+      ? b[0]
+      : 50.0;
+}
+
+//================================================================================================//
+double GetMAValue()
+{
+   double b[];
+   ArraySetAsSeries(b, true);
+
+   return (CopyBuffer(HandleMA, 0, 0, 1, b) > 0)
+      ? b[0]
+      : 0;
+}
+
+//================================================================================================//
+void ExecuteTrade(ENUM_ORDER_TYPE type, ulong basketId)
+{
+   if(basketId == 0)
+      return;
+
+   int basketDirection = (type == ORDER_TYPE_BUY) ? 1 : -1;
+   int basketCount = 0;
+   int dummyDirection = 0;
+   double dummyProfit = 0;
+   double dummyLastPrice = 0;
+   GetBasketStats(basketId, dummyDirection, basketCount, dummyProfit, dummyLastPrice);
+
+   if(basketCount >= MaxOrders)
+      return;
+
+   if(BasketStateCount >= MaxBasketCount && !BasketExistsDirection(basketDirection))
+      return;
+
+   MqlTradeRequest req = {};
+   MqlTradeResult  res = {};
+
+   req.action       = TRADE_ACTION_DEAL;
+   req.symbol       = SymbolTrade;
+   req.magic        = OrdersID;
+   req.volume       = NormalizeDouble(ManualLotSize * (basketCount + 1), 2);
+   req.type         = type;
+   req.deviation    = 10;
+   req.type_filling = ORDER_FILLING_IOC;
+   req.comment      = BasketComment(basketId, basketDirection);
+
+   req.price =
+      (type == ORDER_TYPE_BUY)
+      ? SymbolInfoDouble(SymbolTrade, SYMBOL_ASK)
+      : SymbolInfoDouble(SymbolTrade, SYMBOL_BID);
+
+   if(!OrderSend(req, res))
+   {
+      PrintFormat("Gagal membuka %s Basket #%I64u. Error: %d",
+                  EnumToString(type), basketId, GetLastError());
+      return;
+   }
+
+   if(res.retcode == TRADE_RETCODE_DONE || res.retcode == TRADE_RETCODE_DONE_PARTIAL)
+   {
+      LastBasketOpenTime = TimeCurrent();
+      RegisterBasketState(basketId);
+      PrintFormat("GRID V03 OPEN: %s Basket #%I64u lot %.2f",
+                  EnumToString(type), basketId, req.volume);
+   }
+   else
+   {
+      PrintFormat("GRID V03 order rejected: Basket #%I64u retcode=%u",
+                  basketId, res.retcode);
+   }
+}
+
+//================================================================================================//
+void CloseOrdersByBasket(ulong basketId)
+{
+   if(basketId == 0)
+      return;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong t = PositionGetTicket(i);
+      if(!IsOurPosition(t))
+         continue;
+
+      if(ParseBasketId(PositionGetString(POSITION_COMMENT)) != basketId)
+         continue;
+
+      ENUM_POSITION_TYPE type =
+         (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+      MqlTradeRequest req = {};
+      MqlTradeResult  res = {};
+
+      req.action   = TRADE_ACTION_DEAL;
+      req.position = t;
+      req.symbol   = SymbolTrade;
+      req.magic    = OrdersID;
+      req.volume   = PositionGetDouble(POSITION_VOLUME);
+      req.type     = (type == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+      req.price    = (type == POSITION_TYPE_BUY)
+         ? SymbolInfoDouble(SymbolTrade, SYMBOL_BID)
+         : SymbolInfoDouble(SymbolTrade, SYMBOL_ASK);
+      req.deviation = 10;
+      req.type_filling = ORDER_FILLING_IOC;
+      req.comment = StringFormat("G06V3|CLOSE|B%I64u", basketId);
+
+      if(!OrderSend(req, res))
+      {
+         PrintFormat("Gagal menutup Basket #%I64u tiket #%I64u. Error: %d",
+                     basketId, t, GetLastError());
+      }
+   }
+
+   if(CountBasketPositions(basketId) == 0)
+      RemoveBasketState(basketId);
+}
+
+//================================================================================================//
+int CountBasketPositions(ulong basketId)
+{
+   int count = 0;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong t = PositionGetTicket(i);
+      if(!IsOurPosition(t))
+         continue;
+
+      if(ParseBasketId(PositionGetString(POSITION_COMMENT)) == basketId)
+         count++;
+   }
+
+   return count;
+}
+
+//================================================================================================//
+void CloseOrdersByType(ENUM_POSITION_TYPE type)
+{
+   // Kept as a compatibility helper for V02 emergency logic.
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong t = PositionGetTicket(i);
+      if(!IsOurPosition(t))
+         continue;
+
+      if((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) != type)
+         continue;
+
+      ulong basketId = ParseBasketId(PositionGetString(POSITION_COMMENT));
+      if(basketId > 0)
+         CloseOrdersByBasket(basketId);
+   }
+}
+
+//================================================================================================//
+void CloseAllOrders()
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong t = PositionGetTicket(i);
+      if(!IsOurPosition(t))
+         continue;
+
+      ENUM_POSITION_TYPE type =
+         (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+      MqlTradeRequest req = {};
+      MqlTradeResult  res = {};
+
+      req.action   = TRADE_ACTION_DEAL;
+      req.position = t;
+      req.symbol   = SymbolTrade;
+      req.magic    = OrdersID;
+      req.volume   = PositionGetDouble(POSITION_VOLUME);
+      req.type     = (type == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+      req.price    = (type == POSITION_TYPE_BUY)
+         ? SymbolInfoDouble(SymbolTrade, SYMBOL_BID)
+         : SymbolInfoDouble(SymbolTrade, SYMBOL_ASK);
+      req.deviation = 10;
+      req.type_filling = ORDER_FILLING_IOC;
+      req.comment = "G06V3|EMERGENCY";
+
+      if(!OrderSend(req, res))
+      {
+         PrintFormat("Gagal emergency close tiket #%I64u. Error: %d",
+                     t, GetLastError());
+      }
+   }
+}
+
+//================================================================================================//
+int CountBaskets(int direction)
+{
+   ulong ids[100];
+   int total = 0;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(!IsOurPosition(ticket))
+         continue;
+
+      string comment = PositionGetString(POSITION_COMMENT);
+      if(ParseBasketDirection(comment) != direction)
+         continue;
+
+      ulong id = ParseBasketId(comment);
+      if(id == 0)
+         continue;
+
+      bool exists = false;
+      for(int j = 0; j < total; j++)
+      {
+         if(ids[j] == id)
+         {
+            exists = true;
+            break;
+         }
+      }
+
+      if(!exists && total < 100)
+         ids[total++] = id;
+   }
+
+   return total;
+}
+
+//================================================================================================//
+void DisplayDashboard(double dd, double rsi, bool recovery)
+{
+   string mode = recovery ? "RECOVERY MODE (Aggressive)" : "NORMAL GROWTH";
+
+   ulong latestBuyId = 0, latestSellId = 0;
+   int latestBuyCount = 0, latestSellCount = 0;
+   double latestBuyProfit = 0, latestSellProfit = 0;
+   double latestBuyPrice = 0, latestSellPrice = 0;
+
+   GetLatestBasket(1, latestBuyId, latestBuyCount, latestBuyProfit, latestBuyPrice);
+   GetLatestBasket(-1, latestSellId, latestSellCount, latestSellProfit, latestSellPrice);
+
+   Comment(
+      "======== GRID 06 V03 BASKET HEDGE ========\n",
+      "Status   : ", (IsTerminated ? "TERMINATED" : "RUNNING"), "\n",
+      "Mode     : ", mode, "\n",
+      "Drawdown : ", DoubleToString(dd, 2), "%\n",
+      "Adaptive Base : ", DoubleToString(AdaptiveEquityBase, 2), "\n",
+      "Locked Profit : ", DoubleToString(LockedProfit, 2), "\n",
+      "RSI (14) : ", DoubleToString(rsi, 2), "\n",
+      "----------------------------------\n",
+      "BUY Total: ", BuyOrders,
+      " | Basket: #", (string)latestBuyId,
+      " | Layers: ", latestBuyCount,
+      " | Profit: ", DoubleToString(BuyProfits, 2), "\n",
+      "SELL Total: ", SellOrders,
+      " | Basket: #", (string)latestSellId,
+      " | Layers: ", latestSellCount,
+      " | Profit: ", DoubleToString(SellProfits, 2), "\n",
+      "Baskets BUY/SELL: ", CountBaskets(1), "/", CountBaskets(-1), "\n",
+      "Hedge Engine: ", (UseBasketHedge ? "ON" : "OFF"),
+      " | Trigger: ", BasketTriggerOrders, " layers\n",
+      "=================================="
+   );
+}
+//================================================================================================//
