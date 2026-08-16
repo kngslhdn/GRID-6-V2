@@ -1,0 +1,714 @@
+//================================================================================================//
+// Expert Advisor: GRID 06.V03 - BASKET HEDGE & INDEPENDENT EXIT EDITION 2026
+// BASE: GRID 06.V02 CORE
+// CHANGE: Independent BUY/SELL baskets + hedge basket + protected recovery
+//================================================================================================//
+#property strict
+#property copyright "Copyright 2026, Jarvis"
+#property version   "7.00"
+
+//--- Enums ---
+enum Type {Open_Buy_And_Sell, Open__Only_Buy, Open__Only_Sell};
+
+//--- Safety & Recovery ---
+input string SafeParameters          = "||========== SAFETY & RECOVERY ==========||";
+input double MaxEquityLossPercent    = 15.0;
+input bool   UseTrailingProfit       = true;
+input double TrailingStartUSD        = 5.0;
+input double TrailingStopUSD         = 2.0;
+
+//--- Indicators ---
+input string RSI_Settings            = "||========== INDICATORS ==========||";
+input int    MAPeriod                = 200;
+input int    RSIPeriod               = 14;
+input int    RSIUpper                = 61;
+input int    RSILower                = 41;
+
+//--- Grid Core ---
+input string Grid_Settings           = "||========== GRID 06 V02 CORE ==========||";
+input Type   TypeOrdersPlace         = Open_Buy_And_Sell;
+input double PointsForFirstGap       = 6250.0;
+input double GapMultiplier            = 1.3;
+input double TargetProfitUSD         = 5.0;
+input double ManualLotSize           = 0.01;
+input int    MaxOrders               = 3;
+input int    MagicNumber             = 16082016;
+input string CommentsOrders           = "GRID 06 V03";
+
+//--- Basket Engine ---
+input string Basket_Settings         = "||========== BASKET ENGINE ==========||";
+input bool   EnableBasketHedge       = true;
+input int    HedgeTriggerOrders      = 3;
+input double HedgeTriggerGapFactor   = 0.50;
+input double BasketTargetProfitUSD   = 5.0;
+input bool   ProtectOldBaskets       = true;
+input int    MaxActiveBaskets        = 2;
+input int    HedgeCooldownSeconds    = 30;
+
+//--- Trading Hour ---
+input string TradingHourSettings     = "||========== TRADING HOURS ==========||";
+input bool   UseTradingHour          = true;
+input int    StartHour               = 7;
+input int    EndHour                 = 22;
+
+//--- Global Variables ---
+string SymbolTrade;
+int    OrdersID, HandleRSI, HandleMA;
+int    BuyOrders, SellOrders;
+double BuyProfits, SellProfits;
+double PriceOpenLastBuy, PriceOpenLastSell;
+datetime LastBuyOpenTime, LastSellOpenTime;
+
+bool   IsTerminated = false;
+double HighWaterMark = 0;
+
+//--- Basket state: one active basket per direction ---
+int    NextBasketID       = 0;
+int    BuyBasketID        = 0;
+int    SellBasketID       = 0;
+bool   BuyBasketFrozen    = false;
+bool   SellBasketFrozen   = false;
+datetime LastHedgeTime    = 0;
+double BuyPeakProfit      = 0.0;
+double SellPeakProfit     = 0.0;
+
+//--- Adaptive Equity ---
+double InitialBalance     = 0;
+double AdaptiveEquityBase = 0;
+double LockedProfit       = 0;
+
+//================================================================================================//
+bool IsTradingHour()
+{
+   if(!UseTradingHour)
+      return true;
+
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+
+   if(StartHour < EndHour)
+      return (dt.hour >= StartHour && dt.hour < EndHour);
+
+   return (dt.hour >= StartHour || dt.hour < EndHour);
+}
+
+//================================================================================================//
+int ExtractBasketID(string comment)
+{
+   int p = StringFind(comment, "B");
+   if(p < 0)
+      return 0;
+
+   string n = StringSubstr(comment, p + 1);
+   int space = StringFind(n, " ");
+   if(space >= 0)
+      n = StringSubstr(n, 0, space);
+
+   return (int)StringToInteger(n);
+}
+
+//================================================================================================//
+void LoadBasketState()
+{
+   BuyBasketID = 0;
+   SellBasketID = 0;
+   NextBasketID = 0;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(!PositionSelectByTicket(ticket))
+         continue;
+
+      if(PositionGetInteger(POSITION_MAGIC) != OrdersID ||
+         PositionGetString(POSITION_SYMBOL) != SymbolTrade)
+         continue;
+
+      string comment = PositionGetString(POSITION_COMMENT);
+      int id = ExtractBasketID(comment);
+      if(id > NextBasketID)
+         NextBasketID = id;
+
+      ENUM_POSITION_TYPE type =
+         (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+      if(type == POSITION_TYPE_BUY)
+         BuyBasketID = MathMax(BuyBasketID, id);
+      else
+         SellBasketID = MathMax(SellBasketID, id);
+   }
+
+   // The newer basket is the hedge basket. The older basket is protected/frozen.
+   if(BuyBasketID > 0 && SellBasketID > 0 && ProtectOldBaskets)
+   {
+      if(BuyBasketID < SellBasketID)
+         BuyBasketFrozen = true;
+      else if(SellBasketID < BuyBasketID)
+         SellBasketFrozen = true;
+   }
+}
+
+//================================================================================================//
+int ActiveBasketCount()
+{
+   int n = 0;
+   if(BuyOrders > 0) n++;
+   if(SellOrders > 0) n++;
+   return n;
+}
+
+//================================================================================================//
+bool CanOpenDirection(ENUM_ORDER_TYPE type)
+{
+   if(type == ORDER_TYPE_BUY)
+   {
+      if(TypeOrdersPlace == Open__Only_Sell)
+         return false;
+      if(BuyOrders > 0 && BuyBasketFrozen)
+         return false;
+   }
+   else
+   {
+      if(TypeOrdersPlace == Open__Only_Buy)
+         return false;
+      if(SellOrders > 0 && SellBasketFrozen)
+         return false;
+   }
+
+   return true;
+}
+
+//================================================================================================//
+int CreateBasketID(ENUM_ORDER_TYPE type)
+{
+   NextBasketID++;
+
+   if(type == ORDER_TYPE_BUY)
+   {
+      BuyBasketID = NextBasketID;
+      BuyBasketFrozen = false;
+   }
+   else
+   {
+      SellBasketID = NextBasketID;
+      SellBasketFrozen = false;
+   }
+
+   return NextBasketID;
+}
+
+//================================================================================================//
+bool OppositeSignal(int direction)
+{
+   double rsi = GetRSIValue();
+   double ma  = GetMAValue();
+   double bid = SymbolInfoDouble(SymbolTrade, SYMBOL_BID);
+   double ask = SymbolInfoDouble(SymbolTrade, SYMBOL_ASK);
+
+   if(ma <= 0)
+      return false;
+
+   // Strong/simple reversal confirmation. This deliberately uses the V02 MA/RSI core.
+   if(direction > 0)
+      return (bid < ma && rsi < 50.0);
+
+   return (ask > ma && rsi > 50.0);
+}
+
+//================================================================================================//
+bool MarketAgainstBasket(int direction)
+{
+   if(direction > 0 && BuyOrders < HedgeTriggerOrders)
+      return false;
+   if(direction < 0 && SellOrders < HedgeTriggerOrders)
+      return false;
+
+   double gap = PointsForFirstGap * HedgeTriggerGapFactor;
+
+   if(direction > 0)
+   {
+      double bid = SymbolInfoDouble(SymbolTrade, SYMBOL_BID);
+      bool distanceAgainst =
+         (PriceOpenLastBuy > 0 && bid <= PriceOpenLastBuy - gap * _Point);
+      return distanceAgainst || OppositeSignal(direction);
+   }
+
+   double ask = SymbolInfoDouble(SymbolTrade, SYMBOL_ASK);
+   bool distanceAgainst =
+      (PriceOpenLastSell > 0 && ask >= PriceOpenLastSell + gap * _Point);
+   return distanceAgainst || OppositeSignal(direction);
+}
+
+//================================================================================================//
+bool ShouldOpenHedge(ENUM_ORDER_TYPE hedgeType)
+{
+   if(!EnableBasketHedge)
+      return false;
+
+   if(ActiveBasketCount() >= MaxActiveBaskets)
+      return false;
+
+   if(TimeCurrent() - LastHedgeTime < HedgeCooldownSeconds)
+      return false;
+
+   if(hedgeType == ORDER_TYPE_SELL)
+   {
+      if(BuyOrders < HedgeTriggerOrders || BuyBasketID <= 0)
+         return false;
+      if(SellOrders > 0)
+         return false;
+      return MarketAgainstBasket(1);
+   }
+
+   if(SellOrders < HedgeTriggerOrders || SellBasketID <= 0)
+      return false;
+   if(BuyOrders > 0)
+      return false;
+   return MarketAgainstBasket(-1);
+}
+
+//================================================================================================//
+int OnInit()
+{
+   SymbolTrade = _Symbol;
+   OrdersID = (MagicNumber == 0) ? 101010 : MagicNumber;
+
+   HandleRSI = iRSI(SymbolTrade, PERIOD_CURRENT, RSIPeriod, PRICE_CLOSE);
+   HandleMA  = iMA(SymbolTrade, PERIOD_CURRENT, MAPeriod, 0, MODE_SMA, PRICE_CLOSE);
+
+   HighWaterMark = AccountInfoDouble(ACCOUNT_BALANCE);
+   InitialBalance = AccountInfoDouble(ACCOUNT_BALANCE);
+   AdaptiveEquityBase = InitialBalance;
+   LockedProfit = 0;
+
+   if(HandleRSI == INVALID_HANDLE || HandleMA == INVALID_HANDLE)
+   {
+      Print("Gagal inisialisasi indikator!");
+      return(INIT_FAILED);
+   }
+
+   LoadBasketState();
+   UpdateStatus();
+   return(INIT_SUCCEEDED);
+}
+
+//================================================================================================//
+void OnDeinit(const int reason)
+{
+   IndicatorRelease(HandleRSI);
+   IndicatorRelease(HandleMA);
+   Comment("");
+}
+
+//================================================================================================//
+void OnTick()
+{
+   if(IsTerminated || !TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
+      return;
+
+   UpdateStatus();
+
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   double equity  = AccountInfoDouble(ACCOUNT_EQUITY);
+
+   LockedProfit = balance - InitialBalance;
+   if(LockedProfit < 0)
+      LockedProfit = 0;
+   AdaptiveEquityBase = InitialBalance + LockedProfit;
+
+   if(balance > HighWaterMark)
+      HighWaterMark = balance;
+
+   bool IsInRecovery = (balance < HighWaterMark);
+
+   double currentDrawdown = 0;
+   if(equity < AdaptiveEquityBase && AdaptiveEquityBase > 0)
+   {
+      currentDrawdown =
+         ((AdaptiveEquityBase - equity) / AdaptiveEquityBase) * 100.0;
+   }
+
+   if(currentDrawdown >= MaxEquityLossPercent)
+   {
+      PrintFormat("!!! EMERGENCY CUT LOSS: Drawdown %.2f%% !!!", currentDrawdown);
+      CloseAllOrders();
+      IsTerminated = true;
+      return;
+   }
+
+   // Exit is evaluated before new entries so a profitable hedge can close cleanly.
+   ManageBasketExit();
+
+   if(!IsTradingHour())
+   {
+      DisplayDashboard(currentDrawdown, GetRSIValue(), IsInRecovery);
+      return;
+   }
+
+   UpdateStatus();
+
+   //========================================================
+   // 1. HEDGE ENGINE
+   // If a basket reaches MaxOrders and market proves wrong,
+   // open the opposite direction as a NEW basket.
+   //========================================================
+   if(ShouldOpenHedge(ORDER_TYPE_BUY))
+   {
+      if(ExecuteTrade(ORDER_TYPE_BUY, true))
+         LastHedgeTime = TimeCurrent();
+   }
+
+   if(ShouldOpenHedge(ORDER_TYPE_SELL))
+   {
+      if(ExecuteTrade(ORDER_TYPE_SELL, true))
+         LastHedgeTime = TimeCurrent();
+   }
+
+   UpdateStatus();
+
+   //========================================================
+   // 2. NORMAL / RECOVERY GRID ENGINE
+   // Frozen old basket is intentionally ignored.
+   //========================================================
+   if(!BuyBasketFrozen && BuyOrders > 0 && BuyOrders < MaxOrders)
+   {
+      double gap = PointsForFirstGap * MathPow(GapMultiplier, BuyOrders - 1);
+      double ask = SymbolInfoDouble(SymbolTrade, SYMBOL_ASK);
+      if(ask <= PriceOpenLastBuy - gap * _Point)
+         ExecuteTrade(ORDER_TYPE_BUY, false);
+   }
+
+   if(!SellBasketFrozen && SellOrders > 0 && SellOrders < MaxOrders)
+   {
+      double gap = PointsForFirstGap * MathPow(GapMultiplier, SellOrders - 1);
+      double bid = SymbolInfoDouble(SymbolTrade, SYMBOL_BID);
+      if(bid >= PriceOpenLastSell + gap * _Point)
+         ExecuteTrade(ORDER_TYPE_SELL, false);
+   }
+
+   //========================================================
+   // 3. FIRST BASKET ENTRY
+   //========================================================
+   UpdateStatus();
+
+   double rsi = GetRSIValue();
+   double ma  = GetMAValue();
+   double price = SymbolInfoDouble(SymbolTrade, SYMBOL_BID);
+
+   int lowRSI  = IsInRecovery ? (RSILower - 5) : RSILower;
+   int highRSI = IsInRecovery ? (RSIUpper + 5) : RSIUpper;
+
+   bool canOpenBuy = false;
+   bool canOpenSell = false;
+
+   if(BuyOrders == 0 && CanOpenDirection(ORDER_TYPE_BUY))
+   {
+      if(price > ma && rsi < lowRSI)
+         canOpenBuy = true;
+   }
+
+   if(SellOrders == 0 && CanOpenDirection(ORDER_TYPE_SELL))
+   {
+      if(price < ma && rsi > highRSI)
+         canOpenSell = true;
+   }
+
+   if(canOpenBuy)
+      ExecuteTrade(ORDER_TYPE_BUY, false);
+
+   if(canOpenSell)
+      ExecuteTrade(ORDER_TYPE_SELL, false);
+
+   UpdateStatus();
+   DisplayDashboard(currentDrawdown, rsi, IsInRecovery);
+}
+
+//================================================================================================//
+void ManageBasketExit()
+{
+   // BUY basket and SELL basket are completely independent.
+   // A profitable hedge can close without touching the old losing basket.
+   if(BuyOrders > 0)
+   {
+      if(BuyProfits >= BasketTargetProfitUSD)
+      {
+         CloseOrdersByType(POSITION_TYPE_BUY);
+         BuyPeakProfit = 0;
+      }
+      else if(UseTrailingProfit && BuyProfits >= TrailingStartUSD)
+      {
+         if(BuyProfits > BuyPeakProfit)
+            BuyPeakProfit = BuyProfits;
+
+         if(BuyProfits <= BuyPeakProfit - TrailingStopUSD)
+         {
+            CloseOrdersByType(POSITION_TYPE_BUY);
+            BuyPeakProfit = 0;
+         }
+      }
+   }
+   else
+   {
+      BuyPeakProfit = 0;
+      BuyBasketID = 0;
+      BuyBasketFrozen = false;
+   }
+
+   if(SellOrders > 0)
+   {
+      if(SellProfits >= BasketTargetProfitUSD)
+      {
+         CloseOrdersByType(POSITION_TYPE_SELL);
+         SellPeakProfit = 0;
+      }
+      else if(UseTrailingProfit && SellProfits >= TrailingStartUSD)
+      {
+         if(SellProfits > SellPeakProfit)
+            SellPeakProfit = SellProfits;
+
+         if(SellProfits <= SellPeakProfit - TrailingStopUSD)
+         {
+            CloseOrdersByType(POSITION_TYPE_SELL);
+            SellPeakProfit = 0;
+         }
+      }
+   }
+   else
+   {
+      SellPeakProfit = 0;
+      SellBasketID = 0;
+      SellBasketFrozen = false;
+   }
+}
+
+//================================================================================================//
+void UpdateStatus()
+{
+   BuyOrders = 0;
+   SellOrders = 0;
+   BuyProfits = 0;
+   SellProfits = 0;
+   PriceOpenLastBuy = 0;
+   PriceOpenLastSell = 0;
+   LastBuyOpenTime = 0;
+   LastSellOpenTime = 0;
+
+   int maxBuyID = BuyBasketID;
+   int maxSellID = SellBasketID;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(!PositionSelectByTicket(ticket))
+         continue;
+
+      if(PositionGetInteger(POSITION_MAGIC) != OrdersID ||
+         PositionGetString(POSITION_SYMBOL) != SymbolTrade)
+         continue;
+
+      ENUM_POSITION_TYPE type =
+         (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+      double p = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+      datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
+      int id = ExtractBasketID(PositionGetString(POSITION_COMMENT));
+
+      if(id > NextBasketID)
+         NextBasketID = id;
+
+      if(type == POSITION_TYPE_BUY)
+      {
+         BuyOrders++;
+         BuyProfits += p;
+         if(openTime >= LastBuyOpenTime)
+         {
+            LastBuyOpenTime = openTime;
+            PriceOpenLastBuy = PositionGetDouble(POSITION_PRICE_OPEN);
+         }
+         if(id > maxBuyID) maxBuyID = id;
+      }
+      else
+      {
+         SellOrders++;
+         SellProfits += p;
+         if(openTime >= LastSellOpenTime)
+         {
+            LastSellOpenTime = openTime;
+            PriceOpenLastSell = PositionGetDouble(POSITION_PRICE_OPEN);
+         }
+         if(id > maxSellID) maxSellID = id;
+      }
+   }
+
+   BuyBasketID = maxBuyID;
+   SellBasketID = maxSellID;
+
+   // If both baskets exist, the older one is the protected basket.
+   if(ProtectOldBaskets && BuyOrders > 0 && SellOrders > 0)
+   {
+      if(BuyBasketID > 0 && SellBasketID > 0)
+      {
+         if(BuyBasketID < SellBasketID)
+            BuyBasketFrozen = true;
+         else if(SellBasketID < BuyBasketID)
+            SellBasketFrozen = true;
+      }
+   }
+}
+
+//================================================================================================//
+double GetRSIValue()
+{
+   double b[];
+   ArraySetAsSeries(b, true);
+   return (CopyBuffer(HandleRSI, 0, 0, 1, b) > 0) ? b[0] : 50.0;
+}
+
+//================================================================================================//
+double GetMAValue()
+{
+   double b[];
+   ArraySetAsSeries(b, true);
+   return (CopyBuffer(HandleMA, 0, 0, 1, b) > 0) ? b[0] : 0;
+}
+
+//================================================================================================//
+bool ExecuteTrade(ENUM_ORDER_TYPE type, bool hedgeEntry)
+{
+   if(!CanOpenDirection(type))
+      return false;
+
+   if(ActiveBasketCount() >= MaxActiveBaskets &&
+      ((type == ORDER_TYPE_BUY && BuyOrders == 0) ||
+       (type == ORDER_TYPE_SELL && SellOrders == 0)))
+      return false;
+
+   int count = (type == ORDER_TYPE_BUY) ? BuyOrders : SellOrders;
+
+   if(count >= MaxOrders)
+      return false;
+
+   // A new basket is created only when there is no existing basket on that side.
+   if(count == 0)
+      CreateBasketID(type);
+
+   int basketID = (type == ORDER_TYPE_BUY) ? BuyBasketID : SellBasketID;
+   string direction = (type == ORDER_TYPE_BUY) ? "BUY" : "SELL";
+
+   MqlTradeRequest req = {};
+   MqlTradeResult  res = {};
+
+   req.action       = TRADE_ACTION_DEAL;
+   req.symbol       = SymbolTrade;
+   req.magic        = OrdersID;
+   req.volume       = NormalizeDouble(ManualLotSize * (count + 1), 2);
+   req.type         = type;
+   req.deviation    = 10;
+   req.type_filling = ORDER_FILLING_IOC;
+   req.comment      = StringFormat("%s B%d %s", CommentsOrders, basketID, direction);
+
+   req.price = (type == ORDER_TYPE_BUY)
+      ? SymbolInfoDouble(SymbolTrade, SYMBOL_ASK)
+      : SymbolInfoDouble(SymbolTrade, SYMBOL_BID);
+
+   if(!OrderSend(req, res))
+   {
+      PrintFormat("Gagal membuka %s. Error: %d", EnumToString(type), GetLastError());
+      return false;
+   }
+
+   if(res.retcode != TRADE_RETCODE_DONE &&
+      res.retcode != TRADE_RETCODE_PLACED &&
+      res.retcode != TRADE_RETCODE_DONE_PARTIAL)
+   {
+      PrintFormat("Order gagal %s. Retcode: %u", direction, res.retcode);
+      return false;
+   }
+
+   // Opening the hedge freezes the old basket. It must remain untouched
+   // until its own profit/recovery condition is satisfied.
+   if(hedgeEntry && ProtectOldBaskets)
+   {
+      if(type == ORDER_TYPE_SELL && BuyOrders >= HedgeTriggerOrders)
+         BuyBasketFrozen = true;
+      if(type == ORDER_TYPE_BUY && SellOrders >= HedgeTriggerOrders)
+         SellBasketFrozen = true;
+   }
+
+   return true;
+}
+
+//================================================================================================//
+void CloseOrdersByType(ENUM_POSITION_TYPE type)
+{
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong t = PositionGetTicket(i);
+      if(!PositionSelectByTicket(t))
+         continue;
+
+      if(PositionGetInteger(POSITION_MAGIC) != OrdersID ||
+         PositionGetString(POSITION_SYMBOL) != SymbolTrade ||
+         PositionGetInteger(POSITION_TYPE) != type)
+         continue;
+
+      MqlTradeRequest req = {};
+      MqlTradeResult  res = {};
+
+      req.action   = TRADE_ACTION_DEAL;
+      req.position = t;
+      req.symbol   = SymbolTrade;
+      req.volume   = PositionGetDouble(POSITION_VOLUME);
+      req.magic    = OrdersID;
+      req.deviation = 10;
+      req.type_filling = ORDER_FILLING_IOC;
+      req.type = (type == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+      req.price = (type == POSITION_TYPE_BUY)
+         ? SymbolInfoDouble(SymbolTrade, SYMBOL_BID)
+         : SymbolInfoDouble(SymbolTrade, SYMBOL_ASK);
+
+      if(!OrderSend(req, res))
+      {
+         PrintFormat("Gagal menutup tiket #%I64u. Error: %d", t, GetLastError());
+      }
+   }
+}
+
+//================================================================================================//
+void CloseAllOrders()
+{
+   CloseOrdersByType(POSITION_TYPE_BUY);
+   CloseOrdersByType(POSITION_TYPE_SELL);
+}
+
+//================================================================================================//
+void DisplayDashboard(double dd, double rsi, bool recovery)
+{
+   string mode = recovery ? "RECOVERY MODE" : "NORMAL GROWTH";
+   string buyState = BuyBasketFrozen ? "FROZEN/RECOVER" : "ACTIVE";
+   string sellState = SellBasketFrozen ? "FROZEN/RECOVER" : "ACTIVE";
+
+   Comment(
+      "======== GRID 06 V03 BASKET ENGINE ========\n",
+      "Status: ", (IsTerminated ? "TERMINATED" : "RUNNING"),
+      " | Mode: ", mode, "\n",
+      "DD: ", DoubleToString(dd, 2), "% | RSI: ", DoubleToString(rsi, 2), "\n",
+      "Adaptive Base: ", DoubleToString(AdaptiveEquityBase, 2),
+      " | Locked: ", DoubleToString(LockedProfit, 2), "\n",
+      "--------------------------------------------\n",
+      "BUY Basket #", BuyBasketID,
+      " | Orders: ", BuyOrders,
+      " | Profit: ", DoubleToString(BuyProfits, 2),
+      " | ", buyState, "\n",
+      "SELL Basket #", SellBasketID,
+      " | Orders: ", SellOrders,
+      " | Profit: ", DoubleToString(SellProfits, 2),
+      " | ", sellState, "\n",
+      "--------------------------------------------\n",
+      "Active Baskets: ", ActiveBasketCount(),
+      " | Max: ", MaxActiveBaskets,
+      " | Hedge: ", (EnableBasketHedge ? "ON" : "OFF"), "\n",
+      "============================================"
+   );
+}
+//================================================================================================//
