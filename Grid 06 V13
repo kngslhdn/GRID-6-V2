@@ -476,7 +476,6 @@ bool R2Confirmation(ENUM_POSITION_TYPE primaryType){
    ArraySetAsSeries(r,true);
    if(CopyRates(SymbolTrade,PERIOD_M5,0,3,r)<3) return false;
 
-   // Previous completed M5 candle, never the current forming candle.
    double prevHigh=r[1].high;
    double prevLow=r[1].low;
    double rsi=GetR2RSI();
@@ -493,11 +492,11 @@ bool R2Confirmation(ENUM_POSITION_TYPE primaryType){
 //+------------------------------------------------------------------+
 //| FUNCTION: CalculateR2Lot                                        |
 //+------------------------------------------------------------------+
-double CalculateR2Lot(double riskMoney){
-   if(riskMoney<=0.0 || Recovery2StopPoints<=0.0) return 0.0;
+double CalculateR2Lot(double riskMoney,double stopPoints){
+   if(riskMoney<=0.0 || stopPoints<=0.0) return 0.0;
 
    double point=GetPoint();
-   double stopDistancePrice=Recovery2StopPoints*point;
+   double stopDistancePrice=stopPoints*point;
    if(stopDistancePrice<=0.0) return 0.0;
 
    double tickSize=SymbolInfoDouble(SymbolTrade,SYMBOL_TRADE_TICK_SIZE);
@@ -556,26 +555,26 @@ void ManageRecoveryStage2(){
 
    double equity=AccountInfoDouble(ACCOUNT_EQUITY);
    double riskMoney=equity*Recovery2RiskPercent/100.0;
-   double lot=CalculateR2Lot(riskMoney);
+
+   // Broker stop-level can be wider than the configured stop. Size the
+   // lot from the effective distance so actual SL risk stays in budget.
+   long stopsLevel=(long)SymbolInfoInteger(SymbolTrade,SYMBOL_TRADE_STOPS_LEVEL);
+   double effectiveStopPoints=MathMax(Recovery2StopPoints,(double)stopsLevel);
+   if(effectiveStopPoints<=0.0) return;
+
+   double lot=CalculateR2Lot(riskMoney,effectiveStopPoints);
    if(lot<=0.0) return;
 
    double entry=(primaryType==POSITION_TYPE_BUY)
                 ?SymbolInfoDouble(SymbolTrade,SYMBOL_ASK)
                 :SymbolInfoDouble(SymbolTrade,SYMBOL_BID);
-   double stopDistance=Recovery2StopPoints*point;
+   double stopDistance=effectiveStopPoints*point;
    double sl=(primaryType==POSITION_TYPE_BUY)
              ?entry-stopDistance
              :entry+stopDistance;
 
    int digits=(int)SymbolInfoInteger(SymbolTrade,SYMBOL_DIGITS);
    sl=NormalizeDouble(sl,digits);
-
-   long stopsLevel=(long)SymbolInfoInteger(SymbolTrade,SYMBOL_TRADE_STOPS_LEVEL);
-   double minStop=stopsLevel*point;
-   if(primaryType==POSITION_TYPE_BUY && entry-sl<minStop)
-      sl=NormalizeDouble(entry-minStop,digits);
-   if(primaryType==POSITION_TYPE_SELL && sl-entry<minStop)
-      sl=NormalizeDouble(entry+minStop,digits);
 
    trade.SetExpertMagicNumber(OrdersID);
    trade.SetTypeFillingBySymbol(SymbolTrade);
