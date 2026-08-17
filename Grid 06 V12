@@ -189,7 +189,14 @@ void OnTick(){
    ManageBasketExit();
    UpdateStatus();
 
-   if(!IsTradingHour()){ DisplayDashboard(dd); return; }
+   // HARD SESSION CLOSE: when trading hours end, close ALL EA exposure
+   // regardless of primary/recovery stage, basket P/L, or trailing state.
+   // This rule is intentionally evaluated before any recovery logic.
+   if(UseTradingHour && !IsTradingHour()){
+      CloseAllExposure();
+      DisplayDashboard(dd);
+      return;
+   }
 
    // Once any recovery stage is active, primary grid is frozen.
    if(RecoveryActive){
@@ -403,11 +410,13 @@ void ManagePrimaryGrid(){
       if(SymbolInfoDouble(SymbolTrade,SYMBOL_ASK)<=LastBuyPrice-gap) ExecutePrimary(ORDER_TYPE_BUY);
       return;
    }
+
    if(SellOrders>0 && SellOrders<MaxOrders){
       double gap=PointsForFirstGap*MathPow(GapMultiplier,SellOrders-1)*point;
       if(SymbolInfoDouble(SymbolTrade,SYMBOL_BID)>=LastSellPrice+gap) ExecutePrimary(ORDER_TYPE_SELL);
       return;
    }
+
    if(BuyOrders==0 && SellOrders==0){
       double r=GetRSI(), ma=GetMA(0), price=SymbolInfoDouble(SymbolTrade,SYMBOL_BID);
       if(TypeOrdersPlace!=Open__Only_Sell && ma>0 && price>ma && r<RSILower){ ExecutePrimary(ORDER_TYPE_BUY); return; }
@@ -454,6 +463,30 @@ void ManageBasketExit(){
    }else if(p>=TargetProfitUSD){
       DeleteRecoveryPending(); CloseBasket();
    }
+}
+
+//+------------------------------------------------------------------+
+//| FUNCTION: CloseAllExposure                                      |
+//| HARD SESSION-END EXIT: close every EA position and delete every |
+//| EA pending order, regardless of basket stage or P/L.             |
+//+------------------------------------------------------------------+
+void CloseAllExposure(){
+   // Delete every pending order belonging to this EA/symbol first.
+   for(int i=OrdersTotal()-1;i>=0;i--){
+      ulong ticket=OrderGetTicket(i);
+      if(!IsOurOrder(ticket)) continue;
+      trade.OrderDelete(ticket);
+   }
+
+   // Close every open position belonging to this EA/symbol.
+   for(int i=PositionsTotal()-1;i>=0;i--){
+      ulong ticket=PositionGetTicket(i);
+      if(!IsOurPosition(ticket)) continue;
+      trade.PositionClose(ticket);
+   }
+
+   BasketPeakProfit=0;
+   BasketTrailingActive=false;
 }
 
 //+------------------------------------------------------------------+
