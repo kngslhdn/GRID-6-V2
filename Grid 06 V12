@@ -348,9 +348,9 @@ void ManageRecoveryStage2(){
    if(!EnableRecovery || RecoveryStage!=1 || MaxRecoveryStages<2) return;
    if(Recovery1Lots<=0 || Recovery1EntryPrice<=0) return;
 
-   // R2 must only rescue a failed R1. Never open R2 when R1 is profitable.
-   if(RecoveryOnlyWhenMinus && Recovery1Profit>=0.0) return;
-   if(RecoveryOnlyWhenMinus && BasketProfitValue>=0.0) return;
+   // HARD RULE: R2 ONLY rescues a failed R1. This cannot be disabled by input.
+   if(Recovery1Profit>=0.0) return;
+   if(BasketProfitValue>=0.0) return;
 
    double point=SymbolInfoDouble(SymbolTrade,SYMBOL_POINT); if(point<=0) return;
    double bid=SymbolInfoDouble(SymbolTrade,SYMBOL_BID), ask=SymbolInfoDouble(SymbolTrade,SYMBOL_ASK);
@@ -365,11 +365,11 @@ void ManageRecoveryStage2(){
 
    if(adversePoints<Recovery2GapPoints) return;
 
-   // Re-read live basket state immediately before R2.
+   // Re-read live basket state immediately before R2 and enforce the hard rule again.
    UpdateStatus();
    if(RecoveryStage!=1) return;
-   if(RecoveryOnlyWhenMinus && Recovery1Profit>=0.0) return;
-   if(RecoveryOnlyWhenMinus && BasketProfitValue>=0.0) return;
+   if(Recovery1Profit>=0.0) return;
+   if(BasketProfitValue>=0.0) return;
 
    double primaryLots=BuyLots+SellLots;
    if(primaryLots<=0) return;
