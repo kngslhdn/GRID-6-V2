@@ -374,9 +374,141 @@ void ManageRecoveryStage2(){
 }
 
 //+------------------------------------------------------------------+
-//| NOTE                                                            |
-//| Remaining engine functions are intentionally preserved from the  |
-//| tested V12 implementation: primary grid placement, basket exit,  |
-//| trailing, session close and dashboard. Only the optimized input   |
-//| preset above is changed for this commit.                         |
+//| FUNCTION: ManagePrimaryGrid                                     |
+//+------------------------------------------------------------------+
+void ManagePrimaryGrid(){
+   UpdateStatus(); if(BuyOrders>0 && SellOrders>0) return;
+   double point=SymbolInfoDouble(SymbolTrade,SYMBOL_POINT); if(point<=0) return;
+
+   if(BuyOrders>0 && BuyOrders<MaxOrders){
+      double gap=PointsForFirstGap*MathPow(GapMultiplier,BuyOrders-1)*point;
+      if(SymbolInfoDouble(SymbolTrade,SYMBOL_ASK)<=LastBuyPrice-gap)
+         ExecutePrimary(ORDER_TYPE_BUY);
+      return;
+   }
+
+   if(SellOrders>0 && SellOrders<MaxOrders){
+      double gap=PointsForFirstGap*MathPow(GapMultiplier,SellOrders-1)*point;
+      if(SymbolInfoDouble(SymbolTrade,SYMBOL_BID)>=LastSellPrice+gap)
+         ExecutePrimary(ORDER_TYPE_SELL);
+      return;
+   }
+
+   if(BuyOrders==0 && SellOrders==0){
+      double r=GetRSI(), ma=GetMA(0), price=SymbolInfoDouble(SymbolTrade,SYMBOL_BID);
+      if(TypeOrdersPlace!=Open__Only_Sell && ma>0 && price>ma && r<RSILower){ ExecutePrimary(ORDER_TYPE_BUY); return; }
+      if(TypeOrdersPlace!=Open__Only_Buy && ma>0 && price<ma && r>RSIUpper){ ExecutePrimary(ORDER_TYPE_SELL); return; }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| FUNCTION: ExecutePrimary                                        |
+//+------------------------------------------------------------------+
+bool ExecutePrimary(ENUM_ORDER_TYPE type){
+   int count=(type==ORDER_TYPE_BUY)?BuyOrders:SellOrders;
+   if(count>=MaxOrders) return false;
+
+   double lot=NormalizeVolume(ManualLotSize*(count+1));
+   string c=(type==ORDER_TYPE_BUY)
+            ?StringFormat("%s PRIMARY BUY %d",CommentsOrders,count+1)
+            :StringFormat("%s PRIMARY SELL %d",CommentsOrders,count+1);
+
+   trade.SetExpertMagicNumber(OrdersID); trade.SetTypeFillingBySymbol(SymbolTrade);
+   bool ok=(type==ORDER_TYPE_BUY)
+           ?trade.Buy(lot,SymbolTrade,0,0,0,c)
+           :trade.Sell(lot,SymbolTrade,0,0,0,c);
+
+   if(ok && TradeOK()) return true;
+   PrintFormat("V12 PRIMARY FAILED retcode=%u | %s",trade.ResultRetcode(),trade.ResultRetcodeDescription());
+   return false;
+}
+
+//+------------------------------------------------------------------+
+//| FUNCTION: ManageBasketExit                                      |
+//| Primary + R1 + R2 are always treated as one basket.             |
+//+------------------------------------------------------------------+
+void ManageBasketExit(){
+   UpdateStatus();
+   int total=BuyOrders+SellOrders+((RecoveryStage>0)?1:0)+((RecoveryStage>1)?1:0);
+   if(total==0){ BasketPeakProfit=0; BasketTrailingActive=false; return; }
+
+   double p=BasketProfitValue;
+   if(UseTrailingProfit){
+      double arm=MathMax(TargetProfitUSD,TrailingStartUSD);
+      if(!BasketTrailingActive && p>=arm){
+         BasketTrailingActive=true; BasketPeakProfit=p;
+         PrintFormat("V12 BASKET TARGET REACHED -> TRAILING ON | basket=%.2f | stage=%d",p,RecoveryStage);
+      }
+      if(BasketTrailingActive){
+         if(p>BasketPeakProfit) BasketPeakProfit=p;
+         if(p<=BasketPeakProfit-TrailingStopUSD){
+            PrintFormat("V12 BASKET TRAILING CLOSE | peak=%.2f | current=%.2f | stage=%d",BasketPeakProfit,p,RecoveryStage);
+            DeleteRecoveryPending(); CloseBasket();
+         }
+      }
+   }else if(p>=TargetProfitUSD){
+      DeleteRecoveryPending(); CloseBasket();
+   }
+}
+
+//+------------------------------------------------------------------+
+//| FUNCTION: CloseAllExposure                                      |
+//| HARD SESSION-END EXIT: close every EA position and delete every |
+//| EA pending order, regardless of basket stage or P/L.             |
+//+------------------------------------------------------------------+
+void CloseAllExposure(){
+   for(int i=OrdersTotal()-1;i>=0;i--){
+      ulong ticket=OrderGetTicket(i);
+      if(!IsOurOrder(ticket)) continue;
+      trade.OrderDelete(ticket);
+   }
+
+   for(int i=PositionsTotal()-1;i>=0;i--){
+      ulong ticket=PositionGetTicket(i);
+      if(!IsOurPosition(ticket)) continue;
+      trade.PositionClose(ticket);
+   }
+
+   BasketPeakProfit=0;
+   BasketTrailingActive=false;
+}
+
+//+------------------------------------------------------------------+
+//| FUNCTION: CloseBasket                                           |
+//+------------------------------------------------------------------+
+void CloseBasket(){
+   for(int i=PositionsTotal()-1;i>=0;i--){
+      ulong ticket=PositionGetTicket(i); if(!IsOurPosition(ticket)) continue;
+      trade.PositionClose(ticket);
+   }
+   BasketPeakProfit=0; BasketTrailingActive=false;
+}
+
+//+------------------------------------------------------------------+
+//| FUNCTION: DisplayDashboard                                      |
+//+------------------------------------------------------------------+
+void DisplayDashboard(double dd){
+   string state="IDLE";
+   if(RecoveryStage==2) state="ONE BASKET / RECOVERY 2 ACTIVE";
+   else if(RecoveryStage==1) state="ONE BASKET / RECOVERY 1 ACTIVE";
+   else if(BuyOrders==3 && BuyProfit<0) state="BUY 3 MINUS / RECOVERY 1 READY";
+   else if(SellOrders==3 && SellProfit<0) state="SELL 3 MINUS / RECOVERY 1 READY";
+   else if(BuyOrders>0) state="PRIMARY BUY";
+   else if(SellOrders>0) state="PRIMARY SELL";
+
+   Comment("===== GRID 06 V12 =====\n",
+           "State: ",state,"\n",
+           "BASKET P/L: ",DoubleToString(BasketProfitValue,2),"\n",
+           "BUY: ",BuyOrders," | lot=",DoubleToString(BuyLots,2)," | P/L=",DoubleToString(BuyProfit,2),"\n",
+           "SELL: ",SellOrders," | lot=",DoubleToString(SellLots,2)," | P/L=",DoubleToString(SellProfit,2),"\n",
+           "R1: ",(RecoveryStage>=1?"ACTIVE":"OFF")," | lot=",DoubleToString(Recovery1Lots,2)," | P/L=",DoubleToString(Recovery1Profit,2),"\n",
+           "R2: ",(RecoveryStage>=2?"ACTIVE":"OFF")," | lot=",DoubleToString(Recovery2Lots,2)," | P/L=",DoubleToString(Recovery2Profit,2),"\n",
+           "R1: ",DoubleToString(Recovery1Multiplier,2),"x | Gap: ",DoubleToString(Recovery1GapPoints,0)," points\n",
+           "R2: ",DoubleToString(Recovery2Multiplier,2),"x | Gap: ",DoubleToString(Recovery2GapPoints,0)," points\n",
+           "Target: ",DoubleToString(TargetProfitUSD,2)," | Trail: ",(BasketTrailingActive?"ON":"OFF")," | Peak: ",DoubleToString(BasketPeakProfit,2),"\n",
+           "DD: ",DoubleToString(dd,2),"%");
+}
+
+//+------------------------------------------------------------------+
+//| END GRID 06 V12                                                  |
 //+------------------------------------------------------------------+
