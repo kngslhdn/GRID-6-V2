@@ -1,10 +1,9 @@
 //+------------------------------------------------------------------+
-//| GRID 06.V16 - PROFIT DIRECTION + TWO-STAGE RECOVERY + NEWS     |
-//| V15 base logic preserved; MT5 Economic Calendar protection     |
+//| GRID 06.V16 - PROFIT DIRECTION + DYNAMIC RECOVERY + NEWS        |
+//| Recovery activation is based on MaxOrders configured by user.   |
 //+------------------------------------------------------------------+
 #property strict
-#property version "16.01"
-
+#property version "16.02"
 #include <Trade/Trade.mqh>
 CTrade trade;
 
@@ -13,48 +12,46 @@ enum Type {Open_Buy_And_Sell,Open__Only_Buy,Open__Only_Sell};
 //================ BASKET =================//
 input double TargetProfitUSD        = 10.0;
 input bool   UseTrailingProfit       = true;
-input double TrailingStartUSD       = 5.0;
-input double TrailingStopUSD        = 3.0;
+input double TrailingStartUSD        = 5.0;
+input double TrailingStopUSD         = 3.0;
 
 //================ RISK =================//
-input double MaxEquityLossPercent   = 80.0;
+input double MaxEquityLossPercent    = 80.0;
 
 //================ PRIMARY =================//
-input int    MAPeriod               = 200;
-input int    RSIPeriod              = 14;
-input int    RSIUpper               = 61;
-input int    RSILower               = 41;
-input Type   TypeOrdersPlace        = Open_Buy_And_Sell;
+input int    MAPeriod                = 200;
+input int    RSIPeriod               = 14;
+input int    RSIUpper                = 61;
+input int    RSILower                = 41;
+input Type   TypeOrdersPlace         = Open_Buy_And_Sell;
+input double PointsForFirstGap       = 6250.0;
+input double GapMultiplier           = 1.30;
+input bool   EnableProfitDirection   = true;
+input double PointsForProfitGap      = 1000.0;
+input double ManualLotSize           = 0.01;
+input int    MaxOrders               = 3;
 
-// LOSS DIRECTION: preserved from V15
-input double PointsForFirstGap      = 6250.0;
-input double GapMultiplier          = 1.30;
-
-// PROFIT DIRECTION: preserved from V15
-input bool   EnableProfitDirection  = true;
-input double PointsForProfitGap     = 1000.0;
-
-input double ManualLotSize          = 0.01;
-input int    MaxOrders              = 3;
-
-//================ TWO-STAGE RECOVERY =================//
-input bool   EnableRecovery         = true;
-input double Recovery1Multiplier    = 10.0;
-input double Recovery1GapPoints     = 10000.0;
-input double Recovery1MaxLot        = 2.0;
-input double Recovery2Multiplier    = 30.0;
-input double Recovery2GapPoints     = 6250.0;
-input double Recovery2MaxLot        = 2.0;
-input bool   RecoveryOnlyWhenMinus  = true;
-input int    MaxRecoveryStages      = 2;
+//================ DYNAMIC RECOVERY =================//
+// Recovery is tied to MaxOrders. No hard-coded trigger at order 3.
+// Example: MaxOrders=2 -> primary #1,#2; next #3,R1; next #4,R2.
+//          MaxOrders=3 -> primary #1,#2,#3; next #4,R1; next #5,R2.
+//          MaxOrders=4 -> primary #1,#2,#3,#4; next #5,R1; next #6,R2.
+input bool   EnableRecovery          = true;
+input double Recovery1Multiplier     = 10.0;
+input double Recovery1GapPoints      = 10000.0;
+input double Recovery1MaxLot         = 2.0;
+input double Recovery2Multiplier     = 30.0;
+input double Recovery2GapPoints      = 6250.0;
+input double Recovery2MaxLot         = 2.0;
+input bool   RecoveryOnlyWhenMinus   = true;
+input int    MaxRecoveryStages       = 2;
 
 //================ HOURS =================//
-input bool   UseTradingHour         = true;
-input int    StartHour              = 7;
-input int    EndHour                = 22;
+input bool   UseTradingHour          = true;
+input int    StartHour               = 7;
+input int    EndHour                 = 22;
 
 //================ NEWS FILTER =================//
-// Uses MT5 Economic Calendar. Intended for XAUUSD/USD protection.
 input bool   EnableNewsFilter        = true;
 input string NewsCurrency            = "USD";
 input bool   NewsHighImpactOnly      = true;
@@ -69,670 +66,102 @@ input int    NewsRefreshSeconds      = 10;
 input bool   EnableNewsInTester      = false;
 
 //================ ENGINE =================//
-input int    MagicNumber            = 16082016;
-input string CommentsOrders         = "GRID 06 V16";
+input int    MagicNumber             = 16082016;
+input string CommentsOrders          = "GRID 06 V16";
 
 string SymbolTrade;
 int OrdersID,HandleRSI,HandleMA;
-
 int BuyOrders=0,SellOrders=0;
-double BuyLots=0,SellLots=0;
-double BuyProfit=0,SellProfit=0;
+double BuyLots=0,SellLots=0,BuyProfit=0,SellProfit=0;
 double LastBuyPrice=0,LastSellPrice=0;
 double Buy3Price=0,Sell3Price=0;
 datetime LastBuyTime=0,LastSellTime=0;
-
 int RecoveryStage=0;
 double Recovery1Lots=0,Recovery1Profit=0,Recovery1EntryPrice=0;
 double Recovery2Lots=0,Recovery2Profit=0,Recovery2EntryPrice=0;
 ENUM_POSITION_TYPE Recovery1Type=WRONG_VALUE;
 ENUM_POSITION_TYPE Recovery2Type=WRONG_VALUE;
-
 double RecoveryLots=0,RecoveryProfit=0;
 bool RecoveryActive=false;
+double BasketProfitValue=0,BasketPeakProfit=0;
+bool BasketTrailingActive=false,IsTerminated=false;
+double InitialBalance=0,HighWaterMark=0;
 
-double BasketProfitValue=0;
-double BasketPeakProfit=0;
-bool BasketTrailingActive=false;
-bool IsTerminated=false;
-double InitialBalance=0;
-double HighWaterMark=0;
-
-//================ NEWS STATE =================//
-bool NewsBlockActive=false;
-bool NewsCloseWindow=false;
-datetime NextNewsTime=0;
-string NextNewsName="";
-string NextNewsCurrency="";
+bool NewsBlockActive=false,NewsCloseWindow=false;
+datetime NextNewsTime=0,ActiveNewsTime=0,NewsLastScan=0;
+string NextNewsName="",NextNewsCurrency="",ActiveNewsName="",ActiveNewsCurrency="";
 long NextNewsImportance=0;
-datetime ActiveNewsTime=0;
-string ActiveNewsName="";
-string ActiveNewsCurrency="";
-datetime NewsLastScan=0;
 
 //+------------------------------------------------------------------+
 //| FUNCTION: IsTradingHour                                         |
 //+------------------------------------------------------------------+
-bool IsTradingHour(){
-   if(!UseTradingHour) return true;
-   MqlDateTime dt; TimeToStruct(TimeCurrent(),dt);
-   if(StartHour<EndHour) return dt.hour>=StartHour && dt.hour<EndHour;
-   return dt.hour>=StartHour || dt.hour<EndHour;
-}
+bool IsTradingHour(){if(!UseTradingHour)return true;MqlDateTime dt;TimeToStruct(TimeCurrent(),dt);if(StartHour<EndHour)return dt.hour>=StartHour&&dt.hour<EndHour;return dt.hour>=StartHour||dt.hour<EndHour;}
+bool IsOurPosition(ulong ticket){if(ticket==0||!PositionSelectByTicket(ticket))return false;return PositionGetInteger(POSITION_MAGIC)==OrdersID&&PositionGetString(POSITION_SYMBOL)==SymbolTrade;}
+bool IsOurOrder(ulong ticket){if(ticket==0||!OrderSelect(ticket))return false;return OrderGetInteger(ORDER_MAGIC)==OrdersID&&OrderGetString(ORDER_SYMBOL)==SymbolTrade;}
+bool TradeOK(){uint r=trade.ResultRetcode();return r==TRADE_RETCODE_DONE||r==TRADE_RETCODE_DONE_PARTIAL||r==TRADE_RETCODE_PLACED;}
+double NormalizeVolume(double v){double mn=SymbolInfoDouble(SymbolTrade,SYMBOL_VOLUME_MIN),mx=SymbolInfoDouble(SymbolTrade,SYMBOL_VOLUME_MAX),st=SymbolInfoDouble(SymbolTrade,SYMBOL_VOLUME_STEP);if(mn<=0)mn=0.01;if(st<=0)st=0.01;if(mx<=0)mx=v;v=MathMax(mn,MathMin(mx,v));v=MathRound(v/st)*st;v=MathMax(mn,MathMin(mx,v));int digits=(st<0.01)?3:2;if(st<0.001)digits=4;return NormalizeDouble(v,digits);}
+double GetRSI(){double b[];ArraySetAsSeries(b,true);return CopyBuffer(HandleRSI,0,0,1,b)>0?b[0]:50.0;}
+double GetMA(int shift=0){double b[];ArraySetAsSeries(b,true);return CopyBuffer(HandleMA,0,shift,1,b)>0?b[0]:0.0;}
 
 //+------------------------------------------------------------------+
-//| FUNCTION: IsOurPosition                                         |
+//| FUNCTION: News engine                                           |
 //+------------------------------------------------------------------+
-bool IsOurPosition(ulong ticket){
-   if(ticket==0 || !PositionSelectByTicket(ticket)) return false;
-   return PositionGetInteger(POSITION_MAGIC)==OrdersID && PositionGetString(POSITION_SYMBOL)==SymbolTrade;
-}
-
-//+------------------------------------------------------------------+
-//| FUNCTION: IsOurOrder                                            |
-//+------------------------------------------------------------------+
-bool IsOurOrder(ulong ticket){
-   if(ticket==0 || !OrderSelect(ticket)) return false;
-   return OrderGetInteger(ORDER_MAGIC)==OrdersID && OrderGetString(ORDER_SYMBOL)==SymbolTrade;
-}
-
-//+------------------------------------------------------------------+
-//| FUNCTION: TradeOK                                               |
-//+------------------------------------------------------------------+
-bool TradeOK(){
-   uint r=trade.ResultRetcode();
-   return r==TRADE_RETCODE_DONE || r==TRADE_RETCODE_DONE_PARTIAL || r==TRADE_RETCODE_PLACED;
-}
-
-//+------------------------------------------------------------------+
-//| FUNCTION: NormalizeVolume                                       |
-//+------------------------------------------------------------------+
-double NormalizeVolume(double v){
-   double mn=SymbolInfoDouble(SymbolTrade,SYMBOL_VOLUME_MIN);
-   double mx=SymbolInfoDouble(SymbolTrade,SYMBOL_VOLUME_MAX);
-   double st=SymbolInfoDouble(SymbolTrade,SYMBOL_VOLUME_STEP);
-   if(mn<=0) mn=0.01;
-   if(st<=0) st=0.01;
-   if(mx<=0) mx=v;
-   v=MathMax(mn,MathMin(mx,v));
-   v=MathRound(v/st)*st;
-   v=MathMax(mn,MathMin(mx,v));
-   int digits=(st<0.01)?3:2;
-   if(st<0.001) digits=4;
-   return NormalizeDouble(v,digits);
-}
-
-//+------------------------------------------------------------------+
-//| FUNCTION: GetRSI                                                |
-//+------------------------------------------------------------------+
-double GetRSI(){
-   double b[]; ArraySetAsSeries(b,true);
-   return CopyBuffer(HandleRSI,0,0,1,b)>0 ? b[0] : 50.0;
-}
-
-//+------------------------------------------------------------------+
-//| FUNCTION: GetMA                                                 |
-//+------------------------------------------------------------------+
-double GetMA(int shift=0){
-   double b[]; ArraySetAsSeries(b,true);
-   return CopyBuffer(HandleMA,0,shift,1,b)>0 ? b[0] : 0.0;
-}
-
-//+------------------------------------------------------------------+
-//| FUNCTION: IsNewsEngineAllowed                                   |
-//+------------------------------------------------------------------+
-bool IsNewsEngineAllowed(){
-   if(!EnableNewsFilter) return false;
-   if(MQLInfoInteger(MQL_TESTER) && !EnableNewsInTester) return false;
-   return true;
-}
-
-//+------------------------------------------------------------------+
-//| FUNCTION: NewsImportanceAllowed                                 |
-//+------------------------------------------------------------------+
-bool NewsImportanceAllowed(long importance){
-   if(!NewsHighImpactOnly) return true;
-   return importance==CALENDAR_IMPORTANCE_HIGH;
-}
-
-//+------------------------------------------------------------------+
-//| FUNCTION: UpdateNewsStatus                                      |
-//+------------------------------------------------------------------+
+bool IsNewsEngineAllowed(){if(!EnableNewsFilter)return false;if(MQLInfoInteger(MQL_TESTER)&&!EnableNewsInTester)return false;return true;}
+bool NewsImportanceAllowed(long importance){if(!NewsHighImpactOnly)return true;return importance==CALENDAR_IMPORTANCE_HIGH;}
 void UpdateNewsStatus(){
-   NewsBlockActive=false;
-   NewsCloseWindow=false;
-   NextNewsTime=0;
-   NextNewsName="";
-   NextNewsCurrency="";
-   NextNewsImportance=0;
-   ActiveNewsTime=0;
-   ActiveNewsName="";
-   ActiveNewsCurrency="";
-   NewsLastScan=TimeTradeServer();
-
-   if(!IsNewsEngineAllowed()) return;
-
-   datetime now=TimeTradeServer();
-   if(now<=0) now=TimeCurrent();
-
-   datetime from=now-86400;
-   datetime to=now+3*86400;
-
-   MqlCalendarValue values[];
-   ResetLastError();
-   int total=CalendarValueHistory(values,from,to,"",NewsCurrency);
-   if(total<=0) return;
-
-   for(int i=0;i<total;i++){
-      ulong event_id=values[i].event_id;
-      MqlCalendarEvent event;
-      if(!CalendarEventById(event_id,event)) continue;
-      if(!NewsImportanceAllowed((long)event.importance)) continue;
-
-      MqlCalendarCountry country;
-      if(!CalendarCountryById(event.country_id,country)) continue;
-      if(NewsCurrency!="" && country.currency!=NewsCurrency) continue;
-
-      datetime eventTime=values[i].time;
-      if(eventTime<=0) continue;
-
-      long secondsBefore=(long)MathMax(0,NewsBeforeMinutes)*60;
-      long secondsAfter=(long)MathMax(0,NewsAfterMinutes)*60;
-      long secondsClose=(long)MathMax(0,CloseBeforeNewsMinutes)*60;
-
-      bool inBlock=(now >= eventTime-secondsBefore && now <= eventTime+secondsAfter);
-      bool inClose=(CloseBeforeNews && now >= eventTime-secondsClose && now < eventTime);
-
-      if(inBlock){
-         NewsBlockActive=true;
-         if(ActiveNewsTime==0 || eventTime>ActiveNewsTime){
-            ActiveNewsTime=eventTime;
-            ActiveNewsName=event.name;
-            ActiveNewsCurrency=country.currency;
-         }
-      }
-
-      if(inClose){
-         NewsCloseWindow=true;
-         if(ActiveNewsTime==0 || eventTime<ActiveNewsTime){
-            ActiveNewsTime=eventTime;
-            ActiveNewsName=event.name;
-            ActiveNewsCurrency=country.currency;
-         }
-      }
-
-      if(eventTime>=now && (NextNewsTime==0 || eventTime<NextNewsTime)){
-         NextNewsTime=eventTime;
-         NextNewsName=event.name;
-         NextNewsCurrency=country.currency;
-         NextNewsImportance=(long)event.importance;
-      }
-   }
+   NewsBlockActive=false;NewsCloseWindow=false;NextNewsTime=0;NextNewsName="";NextNewsCurrency="";NextNewsImportance=0;ActiveNewsTime=0;ActiveNewsName="";ActiveNewsCurrency="";NewsLastScan=TimeTradeServer();
+   if(!IsNewsEngineAllowed())return;datetime now=TimeTradeServer();if(now<=0)now=TimeCurrent();
+   datetime from=now-86400,to=now+3*86400;MqlCalendarValue values[];ResetLastError();int total=CalendarValueHistory(values,from,to,"",NewsCurrency);if(total<=0)return;
+   for(int i=0;i<total;i++){ulong event_id=values[i].event_id;MqlCalendarEvent event;if(!CalendarEventById(event_id,event))continue;if(!NewsImportanceAllowed((long)event.importance))continue;MqlCalendarCountry country;if(!CalendarCountryById(event.country_id,country))continue;if(NewsCurrency!=""&&country.currency!=NewsCurrency)continue;datetime eventTime=values[i].time;if(eventTime<=0)continue;long b=(long)MathMax(0,NewsBeforeMinutes)*60,a=(long)MathMax(0,NewsAfterMinutes)*60,c=(long)MathMax(0,CloseBeforeNewsMinutes)*60;bool inBlock=(now>=eventTime-b&&now<=eventTime+a),inClose=(CloseBeforeNews&&now>=eventTime-c&&now<eventTime);if(inBlock){NewsBlockActive=true;if(ActiveNewsTime==0||eventTime>ActiveNewsTime){ActiveNewsTime=eventTime;ActiveNewsName=event.name;ActiveNewsCurrency=country.currency;}}if(inClose){NewsCloseWindow=true;if(ActiveNewsTime==0||eventTime<ActiveNewsTime){ActiveNewsTime=eventTime;ActiveNewsName=event.name;ActiveNewsCurrency=country.currency;}}if(eventTime>=now&&(NextNewsTime==0||eventTime<NextNewsTime)){NextNewsTime=eventTime;NextNewsName=event.name;NextNewsCurrency=country.currency;NextNewsImportance=(long)event.importance;}}
 }
+string NewsStatusText(){if(!IsNewsEngineAllowed())return "OFF";if(NewsCloseWindow)return "CLOSE";if(NewsBlockActive)return "BLOCKED";return "CLEAR";}
+bool IsNewsBlockingRecovery(){return IsNewsEngineAllowed()&&NewsBlockActive&&BlockRecovery;}
+bool IsNewsBlockingPrimary(){if(!IsNewsEngineAllowed()||!NewsBlockActive)return false;if(BuyOrders==0&&SellOrders==0)return BlockNewEntries;return BlockGridExpansion;}
+string NewsNextText(){if(!IsNewsEngineAllowed())return "N/A";if(NextNewsTime==0)return "NONE";return StringFormat("%s %s | %s",NextNewsCurrency,NextNewsName,TimeToString(NextNewsTime,TIME_DATE|TIME_MINUTES));}
 
 //+------------------------------------------------------------------+
-//| FUNCTION: NewsStatusText                                        |
+//| FUNCTION: OnInit / OnDeinit / OnTimer                            |
 //+------------------------------------------------------------------+
-string NewsStatusText(){
-   if(!IsNewsEngineAllowed()) return "OFF";
-   if(NewsCloseWindow) return "CLOSE";
-   if(NewsBlockActive) return "BLOCKED";
-   return "CLEAR";
-}
-
-//+------------------------------------------------------------------+
-//| FUNCTION: IsNewsBlockingRecovery                                |
-//+------------------------------------------------------------------+
-bool IsNewsBlockingRecovery(){
-   return IsNewsEngineAllowed() && NewsBlockActive && BlockRecovery;
-}
-
-//+------------------------------------------------------------------+
-//| FUNCTION: IsNewsBlockingPrimary                                 |
-//+------------------------------------------------------------------+
-bool IsNewsBlockingPrimary(){
-   if(!IsNewsEngineAllowed() || !NewsBlockActive) return false;
-   if(BuyOrders==0 && SellOrders==0) return BlockNewEntries;
-   return BlockGridExpansion;
-}
-
-//+------------------------------------------------------------------+
-//| FUNCTION: ManageNewsProtection                                  |
-//+------------------------------------------------------------------+
-bool ManageNewsProtection(){
-   if(!IsNewsEngineAllowed()) return false;
-   if(NewsCloseWindow){
-      DeleteRecoveryPending();
-      CloseAllExposure();
-      PrintFormat("V16 NEWS CLOSE | %s | event=%s | event_time=%s",
-                  ActiveNewsCurrency,ActiveNewsName,
-                  TimeToString(ActiveNewsTime,TIME_DATE|TIME_MINUTES));
-      return true;
-   }
-   return false;
-}
-
-//+------------------------------------------------------------------+
-//| FUNCTION: NewsNextText                                          |
-//+------------------------------------------------------------------+
-string NewsNextText(){
-   if(!IsNewsEngineAllowed()) return "N/A";
-   if(NextNewsTime==0) return "NONE";
-   return StringFormat("%s %s | %s",
-                       NextNewsCurrency,
-                       NextNewsName,
-                       TimeToString(NextNewsTime,TIME_DATE|TIME_MINUTES));
-}
-
-//+------------------------------------------------------------------+
-//| FUNCTION: OnInit                                                |
-//+------------------------------------------------------------------+
-int OnInit(){
-   SymbolTrade=_Symbol;
-   OrdersID=(MagicNumber==0)?101010:MagicNumber;
-   InitialBalance=AccountInfoDouble(ACCOUNT_BALANCE);
-   HighWaterMark=InitialBalance;
-   HandleRSI=iRSI(SymbolTrade,PERIOD_CURRENT,RSIPeriod,PRICE_CLOSE);
-   HandleMA=iMA(SymbolTrade,PERIOD_CURRENT,MAPeriod,0,MODE_SMA,PRICE_CLOSE);
-   trade.SetExpertMagicNumber(OrdersID);
-   trade.SetDeviationInPoints(10);
-   trade.SetTypeFillingBySymbol(SymbolTrade);
-   if(HandleRSI==INVALID_HANDLE || HandleMA==INVALID_HANDLE) return INIT_FAILED;
-   if(AccountInfoInteger(ACCOUNT_MARGIN_MODE)!=ACCOUNT_MARGIN_MODE_RETAIL_HEDGING) return INIT_FAILED;
-
-   if(IsNewsEngineAllowed()){
-      int timerSec=MathMax(1,NewsRefreshSeconds);
-      EventSetTimer(timerSec);
-      UpdateNewsStatus();
-   }
-
-   UpdateStatus();
-   return INIT_SUCCEEDED;
-}
-
-//+------------------------------------------------------------------+
-//| FUNCTION: OnDeinit                                              |
-//+------------------------------------------------------------------+
-void OnDeinit(const int reason){
-   if(IsNewsEngineAllowed()) EventKillTimer();
-   IndicatorRelease(HandleRSI);
-   IndicatorRelease(HandleMA);
-   Comment("");
-}
-
-//+------------------------------------------------------------------+
-//| FUNCTION: OnTimer                                               |
-//+------------------------------------------------------------------+
-void OnTimer(){
-   UpdateNewsStatus();
-}
+int OnInit(){SymbolTrade=_Symbol;OrdersID=(MagicNumber==0)?101010:MagicNumber;InitialBalance=AccountInfoDouble(ACCOUNT_BALANCE);HighWaterMark=InitialBalance;HandleRSI=iRSI(SymbolTrade,PERIOD_CURRENT,RSIPeriod,PRICE_CLOSE);HandleMA=iMA(SymbolTrade,PERIOD_CURRENT,MAPeriod,0,MODE_SMA,PRICE_CLOSE);trade.SetExpertMagicNumber(OrdersID);trade.SetDeviationInPoints(10);trade.SetTypeFillingBySymbol(SymbolTrade);if(HandleRSI==INVALID_HANDLE||HandleMA==INVALID_HANDLE)return INIT_FAILED;if(AccountInfoInteger(ACCOUNT_MARGIN_MODE)!=ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)return INIT_FAILED;if(IsNewsEngineAllowed()){EventSetTimer(MathMax(1,NewsRefreshSeconds));UpdateNewsStatus();}UpdateStatus();return INIT_SUCCEEDED;}
+void OnDeinit(const int reason){if(IsNewsEngineAllowed())EventKillTimer();IndicatorRelease(HandleRSI);IndicatorRelease(HandleMA);Comment("");}
+void OnTimer(){UpdateNewsStatus();}
 
 //+------------------------------------------------------------------+
 //| FUNCTION: OnTick                                                |
 //+------------------------------------------------------------------+
-void OnTick(){
-   if(IsTerminated || !TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)) return;
-
-   UpdateStatus();
-   double balance=AccountInfoDouble(ACCOUNT_BALANCE);
-   double equity=AccountInfoDouble(ACCOUNT_EQUITY);
-   if(balance>HighWaterMark) HighWaterMark=balance;
-   double dd=(equity<balance && balance>0)?(balance-equity)/balance*100.0:0.0;
-
-   if(dd>=MaxEquityLossPercent){
-      DeleteRecoveryPending();
-      CloseBasket();
-      IsTerminated=true;
-      return;
-   }
-
-   ManageBasketExit();
-   UpdateStatus();
-
-   if(UseTradingHour && !IsTradingHour()){
-      CloseAllExposure();
-      DisplayDashboard(dd);
-      return;
-   }
-
-   if(ManageNewsProtection()){
-      DisplayDashboard(dd);
-      return;
-   }
-
-   if(RecoveryActive){
-      if(!IsNewsBlockingRecovery()) ManageRecoveryStage2();
-      DisplayDashboard(dd);
-      return;
-   }
-
-   if(BuyOrders>=MaxOrders && SellOrders==0){
-      if(!IsNewsBlockingRecovery()) ManageRecoveryStage1(POSITION_TYPE_BUY);
-      DisplayDashboard(dd);
-      return;
-   }
-
-   if(SellOrders>=MaxOrders && BuyOrders==0){
-      if(!IsNewsBlockingRecovery()) ManageRecoveryStage1(POSITION_TYPE_SELL);
-      DisplayDashboard(dd);
-      return;
-   }
-
-   if(!IsNewsBlockingPrimary()) ManagePrimaryGrid();
-   DisplayDashboard(dd);
+void OnTick(){if(IsTerminated||!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))return;UpdateStatus();double balance=AccountInfoDouble(ACCOUNT_BALANCE),equity=AccountInfoDouble(ACCOUNT_EQUITY);if(balance>HighWaterMark)HighWaterMark=balance;double dd=(equity<balance&&balance>0)?(balance-equity)/balance*100.0:0.0;if(dd>=MaxEquityLossPercent){DeleteRecoveryPending();CloseBasket();IsTerminated=true;return;}ManageBasketExit();UpdateStatus();if(UseTradingHour&&!IsTradingHour()){CloseAllExposure();DisplayDashboard(dd);return;}if(ManageNewsProtection()){DisplayDashboard(dd);return;}if(RecoveryActive){if(!IsNewsBlockingRecovery())ManageRecoveryStage2();DisplayDashboard(dd);return;}
+   // Recovery starts ONLY after primary MaxOrders are all open.
+   if(BuyOrders>=MaxOrders&&SellOrders==0){if(!IsNewsBlockingRecovery())ManageRecoveryStage1(POSITION_TYPE_BUY);DisplayDashboard(dd);return;}
+   if(SellOrders>=MaxOrders&&BuyOrders==0){if(!IsNewsBlockingRecovery())ManageRecoveryStage1(POSITION_TYPE_SELL);DisplayDashboard(dd);return;}
+   if(!IsNewsBlockingPrimary())ManagePrimaryGrid();DisplayDashboard(dd);
 }
 
 //+------------------------------------------------------------------+
 //| FUNCTION: UpdateStatus                                          |
 //+------------------------------------------------------------------+
-void UpdateStatus(){
-   BuyOrders=SellOrders=0;
-   BuyLots=SellLots=0;
-   BuyProfit=SellProfit=0;
-   LastBuyPrice=LastSellPrice=0;
-   Buy3Price=Sell3Price=0;
-   LastBuyTime=LastSellTime=0;
-
-   RecoveryStage=0;
-   Recovery1Lots=Recovery1Profit=Recovery1EntryPrice=0;
-   Recovery2Lots=Recovery2Profit=Recovery2EntryPrice=0;
-   Recovery1Type=WRONG_VALUE;
-   Recovery2Type=WRONG_VALUE;
-
-   for(int i=PositionsTotal()-1;i>=0;i--){
-      ulong ticket=PositionGetTicket(i);
-      if(!IsOurPosition(ticket)) continue;
-
-      ENUM_POSITION_TYPE type=(ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
-      double lot=PositionGetDouble(POSITION_VOLUME);
-      double p=PositionGetDouble(POSITION_PROFIT)+PositionGetDouble(POSITION_SWAP);
-      double open=PositionGetDouble(POSITION_PRICE_OPEN);
-      datetime tm=(datetime)PositionGetInteger(POSITION_TIME);
-      string c=PositionGetString(POSITION_COMMENT);
-
-      bool recovery1=StringFind(c,"RECOVERY 1 BUY")>=0 || StringFind(c,"RECOVERY 1 SELL")>=0;
-      bool recovery2=StringFind(c,"RECOVERY 2 BUY")>=0 || StringFind(c,"RECOVERY 2 SELL")>=0;
-
-      if(recovery1){
-         Recovery1Lots+=lot;
-         Recovery1Profit+=p;
-         Recovery1EntryPrice=open;
-         Recovery1Type=type;
-         RecoveryStage=MathMax(RecoveryStage,1);
-         continue;
-      }
-
-      if(recovery2){
-         Recovery2Lots+=lot;
-         Recovery2Profit+=p;
-         Recovery2EntryPrice=open;
-         Recovery2Type=type;
-         RecoveryStage=MathMax(RecoveryStage,2);
-         continue;
-      }
-
-      if(type==POSITION_TYPE_BUY){
-         BuyOrders++;
-         BuyLots+=lot;
-         BuyProfit+=p;
-         if(tm>=LastBuyTime){ LastBuyTime=tm; LastBuyPrice=open; }
-         if(StringFind(c,"PRIMARY BUY 3")>=0) Buy3Price=open;
-      }
-      else if(type==POSITION_TYPE_SELL){
-         SellOrders++;
-         SellLots+=lot;
-         SellProfit+=p;
-         if(tm>=LastSellTime){ LastSellTime=tm; LastSellPrice=open; }
-         if(StringFind(c,"PRIMARY SELL 3")>=0) Sell3Price=open;
-      }
-   }
-
-   RecoveryLots=Recovery1Lots+Recovery2Lots;
-   RecoveryProfit=Recovery1Profit+Recovery2Profit;
-   RecoveryActive=(RecoveryStage>0);
-   BasketProfitValue=BuyProfit+SellProfit+RecoveryProfit;
-}
+void UpdateStatus(){BuyOrders=SellOrders=0;BuyLots=SellLots=0;BuyProfit=SellProfit=0;LastBuyPrice=LastSellPrice=0;Buy3Price=Sell3Price=0;LastBuyTime=LastSellTime=0;RecoveryStage=0;Recovery1Lots=Recovery1Profit=Recovery1EntryPrice=0;Recovery2Lots=Recovery2Profit=Recovery2EntryPrice=0;Recovery1Type=WRONG_VALUE;Recovery2Type=WRONG_VALUE;for(int i=PositionsTotal()-1;i>=0;i--){ulong ticket=PositionGetTicket(i);if(!IsOurPosition(ticket))continue;ENUM_POSITION_TYPE type=(ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);double lot=PositionGetDouble(POSITION_VOLUME),p=PositionGetDouble(POSITION_PROFIT)+PositionGetDouble(POSITION_SWAP),open=PositionGetDouble(POSITION_PRICE_OPEN);datetime tm=(datetime)PositionGetInteger(POSITION_TIME);string c=PositionGetString(POSITION_COMMENT);bool recovery1=StringFind(c,"RECOVERY 1 BUY")>=0||StringFind(c,"RECOVERY 1 SELL")>=0;bool recovery2=StringFind(c,"RECOVERY 2 BUY")>=0||StringFind(c,"RECOVERY 2 SELL")>=0;if(recovery1){Recovery1Lots+=lot;Recovery1Profit+=p;Recovery1EntryPrice=open;Recovery1Type=type;RecoveryStage=MathMax(RecoveryStage,1);continue;}if(recovery2){Recovery2Lots+=lot;Recovery2Profit+=p;Recovery2EntryPrice=open;Recovery2Type=type;RecoveryStage=MathMax(RecoveryStage,2);continue;}if(type==POSITION_TYPE_BUY){BuyOrders++;BuyLots+=lot;BuyProfit+=p;if(tm>=LastBuyTime){LastBuyTime=tm;LastBuyPrice=open;}if(StringFind(c,"PRIMARY BUY "+(string)MaxOrders)>=0)Buy3Price=open;else if(MaxOrders==3&&StringFind(c,"PRIMARY BUY 3")>=0)Buy3Price=open;}else if(type==POSITION_TYPE_SELL){SellOrders++;SellLots+=lot;SellProfit+=p;if(tm>=LastSellTime){LastSellTime=tm;LastSellPrice=open;}if(StringFind(c,"PRIMARY SELL "+(string)MaxOrders)>=0)Sell3Price=open;else if(MaxOrders==3&&StringFind(c,"PRIMARY SELL 3")>=0)Sell3Price=open;}}RecoveryLots=Recovery1Lots+Recovery2Lots;RecoveryProfit=Recovery1Profit+Recovery2Profit;RecoveryActive=(RecoveryStage>0);BasketProfitValue=BuyProfit+SellProfit+RecoveryProfit;}
 
 //+------------------------------------------------------------------+
-//| FUNCTION: HasRecoveryPending                                    |
+//| FUNCTION: Recovery pending / stage 1 / stage 2                  |
 //+------------------------------------------------------------------+
-bool HasRecoveryPending(){
-   for(int i=OrdersTotal()-1;i>=0;i--){
-      ulong ticket=OrderGetTicket(i);
-      if(!IsOurOrder(ticket)) continue;
-      string c=OrderGetString(ORDER_COMMENT);
-      if(StringFind(c,"RECOVERY 1 BUY")>=0 || StringFind(c,"RECOVERY 1 SELL")>=0 ||
-         StringFind(c,"RECOVERY 2 BUY")>=0 || StringFind(c,"RECOVERY 2 SELL")>=0) return true;
-   }
-   return false;
-}
-
-//+------------------------------------------------------------------+
-//| FUNCTION: DeleteRecoveryPending                                 |
-//+------------------------------------------------------------------+
-void DeleteRecoveryPending(){
-   for(int i=OrdersTotal()-1;i>=0;i--){
-      ulong ticket=OrderGetTicket(i);
-      if(!IsOurOrder(ticket)) continue;
-      string c=OrderGetString(ORDER_COMMENT);
-      if(StringFind(c,"RECOVERY 1 BUY")<0 && StringFind(c,"RECOVERY 1 SELL")<0 &&
-         StringFind(c,"RECOVERY 2 BUY")<0 && StringFind(c,"RECOVERY 2 SELL")<0) continue;
-      trade.OrderDelete(ticket);
-   }
-}
-
-//+------------------------------------------------------------------+
-//| FUNCTION: ManageRecoveryStage1                                  |
-//+------------------------------------------------------------------+
-void ManageRecoveryStage1(ENUM_POSITION_TYPE primaryType){
-   if(!EnableRecovery || RecoveryStage>0 || HasRecoveryPending()) return;
-   if(MaxRecoveryStages<1) return;
-
-   double primaryPL=(primaryType==POSITION_TYPE_BUY)?BuyProfit:SellProfit;
-   double primaryLots=(primaryType==POSITION_TYPE_BUY)?BuyLots:SellLots;
-   double thirdPrice=(primaryType==POSITION_TYPE_BUY)?Buy3Price:Sell3Price;
-   if(RecoveryOnlyWhenMinus && primaryPL>=0.0) return;
-   if(primaryLots<=0 || thirdPrice<=0) return;
-
-   double point=SymbolInfoDouble(SymbolTrade,SYMBOL_POINT);
-   if(point<=0) return;
-   double bid=SymbolInfoDouble(SymbolTrade,SYMBOL_BID);
-   double ask=SymbolInfoDouble(SymbolTrade,SYMBOL_ASK);
-   double adversePoints=(primaryType==POSITION_TYPE_BUY)?(thirdPrice-bid)/point:(ask-thirdPrice)/point;
-   if(adversePoints<Recovery1GapPoints) return;
-
-   UpdateStatus();
-   double basketBefore=BasketProfitValue;
-   if(RecoveryOnlyWhenMinus && basketBefore>=0.0) return;
-
-   double lot=NormalizeVolume(primaryLots*Recovery1Multiplier);
-   if(Recovery1MaxLot>0.0) lot=NormalizeVolume(MathMin(lot,Recovery1MaxLot));
-   if(lot<=0) return;
-
-   trade.SetExpertMagicNumber(OrdersID);
-   trade.SetTypeFillingBySymbol(SymbolTrade);
-
-   bool ok=false; string c;
-   if(primaryType==POSITION_TYPE_BUY){ c=CommentsOrders+" RECOVERY 1 SELL"; ok=trade.Sell(lot,SymbolTrade,0,0,0,c); }
-   else{ c=CommentsOrders+" RECOVERY 1 BUY"; ok=trade.Buy(lot,SymbolTrade,0,0,0,c); }
-
-   if(ok && TradeOK()) PrintFormat("V16 R1 OPEN | primary=%s | basket=%.2f | primaryLots=%.2f | R1Lot=%.2f | adverse=%.0f",primaryType==POSITION_TYPE_BUY?"BUY":"SELL",basketBefore,primaryLots,lot,adversePoints);
-   else PrintFormat("V16 R1 FAILED | basket=%.2f | lot=%.2f | retcode=%u | %s",basketBefore,lot,trade.ResultRetcode(),trade.ResultRetcodeDescription());
-}
-
-//+------------------------------------------------------------------+
-//| FUNCTION: ManageRecoveryStage2                                  |
-//+------------------------------------------------------------------+
-void ManageRecoveryStage2(){
-   if(!EnableRecovery || RecoveryStage!=1 || MaxRecoveryStages<2) return;
-   if(Recovery1Lots<=0 || Recovery1EntryPrice<=0) return;
-   if(Recovery1Profit>=0.0) return;
-   if(RecoveryOnlyWhenMinus && BasketProfitValue>=0.0) return;
-
-   double point=SymbolInfoDouble(SymbolTrade,SYMBOL_POINT);
-   if(point<=0) return;
-   double bid=SymbolInfoDouble(SymbolTrade,SYMBOL_BID);
-   double ask=SymbolInfoDouble(SymbolTrade,SYMBOL_ASK);
-   double adversePoints=0;
-   if(Recovery1Type==POSITION_TYPE_BUY) adversePoints=(Recovery1EntryPrice-bid)/point;
-   else if(Recovery1Type==POSITION_TYPE_SELL) adversePoints=(ask-Recovery1EntryPrice)/point;
-   else return;
-   if(adversePoints<Recovery2GapPoints) return;
-
-   double baseLots=BuyLots+SellLots;
-   if(baseLots<=0) return;
-   double lot=NormalizeVolume(baseLots*Recovery2Multiplier);
-   if(Recovery2MaxLot>0.0) lot=NormalizeVolume(MathMin(lot,Recovery2MaxLot));
-   if(lot<=0) return;
-
-   trade.SetExpertMagicNumber(OrdersID);
-   trade.SetTypeFillingBySymbol(SymbolTrade);
-   bool ok=false; string c;
-   if(Recovery1Type==POSITION_TYPE_BUY){ c=CommentsOrders+" RECOVERY 2 SELL"; ok=trade.Sell(lot,SymbolTrade,0,0,0,c); }
-   else{ c=CommentsOrders+" RECOVERY 2 BUY"; ok=trade.Buy(lot,SymbolTrade,0,0,0,c); }
-
-   if(ok && TradeOK()) PrintFormat("V16 R2 OPEN | basket=%.2f | R1PL=%.2f | R2Lot=%.2f | adverse=%.0f",BasketProfitValue,Recovery1Profit,lot,adversePoints);
-   else PrintFormat("V16 R2 FAILED | basket=%.2f | lot=%.2f | retcode=%u | %s",BasketProfitValue,lot,trade.ResultRetcode(),trade.ResultRetcodeDescription());
-}
+bool HasRecoveryPending(){for(int i=OrdersTotal()-1;i>=0;i--){ulong ticket=OrderGetTicket(i);if(!IsOurOrder(ticket))continue;string c=OrderGetString(ORDER_COMMENT);if(StringFind(c,"RECOVERY 1 BUY")>=0||StringFind(c,"RECOVERY 1 SELL")>=0||StringFind(c,"RECOVERY 2 BUY")>=0||StringFind(c,"RECOVERY 2 SELL")>=0)return true;}return false;}
+void DeleteRecoveryPending(){for(int i=OrdersTotal()-1;i>=0;i--){ulong ticket=OrderGetTicket(i);if(!IsOurOrder(ticket))continue;string c=OrderGetString(ORDER_COMMENT);if(StringFind(c,"RECOVERY 1 BUY")<0&&StringFind(c,"RECOVERY 1 SELL")<0&&StringFind(c,"RECOVERY 2 BUY")<0&&StringFind(c,"RECOVERY 2 SELL")<0)continue;trade.OrderDelete(ticket);}}
+void ManageRecoveryStage1(ENUM_POSITION_TYPE primaryType){if(!EnableRecovery||RecoveryStage>0||HasRecoveryPending())return;if(MaxRecoveryStages<1)return;double primaryPL=(primaryType==POSITION_TYPE_BUY)?BuyProfit:SellProfit,primaryLots=(primaryType==POSITION_TYPE_BUY)?BuyLots:SellLots,anchorPrice=(primaryType==POSITION_TYPE_BUY)?Buy3Price:Sell3Price;if(RecoveryOnlyWhenMinus&&primaryPL>=0.0)return;if(primaryLots<=0||anchorPrice<=0)return;double point=SymbolInfoDouble(SymbolTrade,SYMBOL_POINT);if(point<=0)return;double bid=SymbolInfoDouble(SymbolTrade,SYMBOL_BID),ask=SymbolInfoDouble(SymbolTrade,SYMBOL_ASK);double adverse=(primaryType==POSITION_TYPE_BUY)?(anchorPrice-bid)/point:(ask-anchorPrice)/point;if(adverse<Recovery1GapPoints)return;UpdateStatus();double basketBefore=BasketProfitValue;if(RecoveryOnlyWhenMinus&&basketBefore>=0.0)return;double lot=NormalizeVolume(primaryLots*Recovery1Multiplier);if(Recovery1MaxLot>0)lot=NormalizeVolume(MathMin(lot,Recovery1MaxLot));if(lot<=0)return;trade.SetExpertMagicNumber(OrdersID);trade.SetTypeFillingBySymbol(SymbolTrade);bool ok=false;string c;if(primaryType==POSITION_TYPE_BUY){c=CommentsOrders+" RECOVERY 1 SELL";ok=trade.Sell(lot,SymbolTrade,0,0,0,c);}else{c=CommentsOrders+" RECOVERY 1 BUY";ok=trade.Buy(lot,SymbolTrade,0,0,0,c);}if(ok&&TradeOK())PrintFormat("V16 R1 OPEN | MaxOrders=%d | primary=%s | basket=%.2f | primaryLots=%.2f | R1Lot=%.2f | adverse=%.0f",MaxOrders,primaryType==POSITION_TYPE_BUY?"BUY":"SELL",basketBefore,primaryLots,lot,adverse);else PrintFormat("V16 R1 FAILED | MaxOrders=%d | basket=%.2f | lot=%.2f | retcode=%u | %s",MaxOrders,basketBefore,lot,trade.ResultRetcode(),trade.ResultRetcodeDescription());}
+void ManageRecoveryStage2(){if(!EnableRecovery||RecoveryStage!=1||MaxRecoveryStages<2)return;if(Recovery1Lots<=0||Recovery1EntryPrice<=0)return;if(Recovery1Profit>=0.0)return;if(RecoveryOnlyWhenMinus&&BasketProfitValue>=0.0)return;double point=SymbolInfoDouble(SymbolTrade,SYMBOL_POINT);if(point<=0)return;double bid=SymbolInfoDouble(SymbolTrade,SYMBOL_BID),ask=SymbolInfoDouble(SymbolTrade,SYMBOL_ASK),adverse=0;if(Recovery1Type==POSITION_TYPE_BUY)adverse=(Recovery1EntryPrice-bid)/point;else if(Recovery1Type==POSITION_TYPE_SELL)adverse=(ask-Recovery1EntryPrice)/point;else return;if(adverse<Recovery2GapPoints)return;double baseLots=BuyLots+SellLots;if(baseLots<=0)return;double lot=NormalizeVolume(baseLots*Recovery2Multiplier);if(Recovery2MaxLot>0)lot=NormalizeVolume(MathMin(lot,Recovery2MaxLot));if(lot<=0)return;trade.SetExpertMagicNumber(OrdersID);trade.SetTypeFillingBySymbol(SymbolTrade);bool ok=false;string c;if(Recovery1Type==POSITION_TYPE_BUY){c=CommentsOrders+" RECOVERY 2 SELL";ok=trade.Sell(lot,SymbolTrade,0,0,0,c);}else{c=CommentsOrders+" RECOVERY 2 BUY";ok=trade.Buy(lot,SymbolTrade,0,0,0,c);}if(ok&&TradeOK())PrintFormat("V16 R2 OPEN | MaxOrders=%d | basket=%.2f | R1PL=%.2f | R2Lot=%.2f | adverse=%.0f",MaxOrders,BasketProfitValue,Recovery1Profit,lot,adverse);else PrintFormat("V16 R2 FAILED | MaxOrders=%d | basket=%.2f | lot=%.2f | retcode=%u | %s",MaxOrders,BasketProfitValue,lot,trade.ResultRetcode(),trade.ResultRetcodeDescription());}
 
 //+------------------------------------------------------------------+
 //| FUNCTION: ManagePrimaryGrid                                     |
 //+------------------------------------------------------------------+
-void ManagePrimaryGrid(){
-   UpdateStatus();
-   if(BuyOrders>0 && SellOrders>0) return;
-   double point=SymbolInfoDouble(SymbolTrade,SYMBOL_POINT);
-   if(point<=0) return;
-
-   if(BuyOrders>0 && BuyOrders<MaxOrders){
-      double ask=SymbolInfoDouble(SymbolTrade,SYMBOL_ASK);
-      double profitGap=PointsForProfitGap*point;
-      double lossGap=PointsForFirstGap*MathPow(GapMultiplier,BuyOrders-1)*point;
-      if(EnableProfitDirection && BuyProfit>0.0){
-         if(ask>=LastBuyPrice+profitGap){ ExecutePrimary(ORDER_TYPE_BUY); return; }
-         return;
-      }
-      if(BuyProfit<=0.0 && ask<=LastBuyPrice-lossGap){ ExecutePrimary(ORDER_TYPE_BUY); return; }
-      return;
-   }
-
-   if(SellOrders>0 && SellOrders<MaxOrders){
-      double bid=SymbolInfoDouble(SymbolTrade,SYMBOL_BID);
-      double profitGap=PointsForProfitGap*point;
-      double lossGap=PointsForFirstGap*MathPow(GapMultiplier,SellOrders-1)*point;
-      if(EnableProfitDirection && SellProfit>0.0){
-         if(bid<=LastSellPrice-profitGap){ ExecutePrimary(ORDER_TYPE_SELL); return; }
-         return;
-      }
-      if(SellProfit<=0.0 && bid>=LastSellPrice+lossGap){ ExecutePrimary(ORDER_TYPE_SELL); return; }
-      return;
-   }
-
-   if(BuyOrders==0 && SellOrders==0){
-      double r=GetRSI();
-      double ma=GetMA(0);
-      double price=SymbolInfoDouble(SymbolTrade,SYMBOL_BID);
-      if(TypeOrdersPlace!=Open__Only_Sell && ma>0 && price>ma && r<RSILower){ ExecutePrimary(ORDER_TYPE_BUY); return; }
-      if(TypeOrdersPlace!=Open__Only_Buy && ma>0 && price<ma && r>RSIUpper){ ExecutePrimary(ORDER_TYPE_SELL); return; }
-   }
-}
+void ManagePrimaryGrid(){UpdateStatus();if(BuyOrders>0&&SellOrders>0)return;double point=SymbolInfoDouble(SymbolTrade,SYMBOL_POINT);if(point<=0)return;if(BuyOrders>0&&BuyOrders<MaxOrders){double ask=SymbolInfoDouble(SymbolTrade,SYMBOL_ASK),profitGap=PointsForProfitGap*point,lossGap=PointsForFirstGap*MathPow(GapMultiplier,BuyOrders-1)*point;if(EnableProfitDirection&&BuyProfit>0){if(ask>=LastBuyPrice+profitGap)ExecutePrimary(ORDER_TYPE_BUY);return;}if(BuyProfit<=0&&ask<=LastBuyPrice-lossGap)ExecutePrimary(ORDER_TYPE_BUY);return;}if(SellOrders>0&&SellOrders<MaxOrders){double bid=SymbolInfoDouble(SymbolTrade,SYMBOL_BID),profitGap=PointsForProfitGap*point,lossGap=PointsForFirstGap*MathPow(GapMultiplier,SellOrders-1)*point;if(EnableProfitDirection&&SellProfit>0){if(bid<=LastSellPrice-profitGap)ExecutePrimary(ORDER_TYPE_SELL);return;}if(SellProfit<=0&&bid>=LastSellPrice+lossGap)ExecutePrimary(ORDER_TYPE_SELL);return;}if(BuyOrders==0&&SellOrders==0){double r=GetRSI(),ma=GetMA(0),price=SymbolInfoDouble(SymbolTrade,SYMBOL_BID);if(TypeOrdersPlace!=Open__Only_Sell&&ma>0&&price>ma&&r<RSILower){ExecutePrimary(ORDER_TYPE_BUY);return;}if(TypeOrdersPlace!=Open__Only_Buy&&ma>0&&price<ma&&r>RSIUpper){ExecutePrimary(ORDER_TYPE_SELL);return;}}}
+bool ExecutePrimary(ENUM_ORDER_TYPE type){int count=(type==ORDER_TYPE_BUY)?BuyOrders:SellOrders;if(count>=MaxOrders)return false;double lot=NormalizeVolume(ManualLotSize*(count+1));string c=(type==ORDER_TYPE_BUY)?StringFormat("%s PRIMARY BUY %d",CommentsOrders,count+1):StringFormat("%s PRIMARY SELL %d",CommentsOrders,count+1);trade.SetExpertMagicNumber(OrdersID);trade.SetTypeFillingBySymbol(SymbolTrade);bool ok=(type==ORDER_TYPE_BUY)?trade.Buy(lot,SymbolTrade,0,0,0,c):trade.Sell(lot,SymbolTrade,0,0,0,c);if(ok&&TradeOK())return true;PrintFormat("V16 PRIMARY FAILED retcode=%u | %s",trade.ResultRetcode(),trade.ResultRetcodeDescription());return false;}
 
 //+------------------------------------------------------------------+
-//| FUNCTION: ExecutePrimary                                        |
+//| FUNCTION: Basket / close / dashboard                            |
 //+------------------------------------------------------------------+
-bool ExecutePrimary(ENUM_ORDER_TYPE type){
-   int count=(type==ORDER_TYPE_BUY)?BuyOrders:SellOrders;
-   if(count>=MaxOrders) return false;
-   double lot=NormalizeVolume(ManualLotSize*(count+1));
-   string c=(type==ORDER_TYPE_BUY)?StringFormat("%s PRIMARY BUY %d",CommentsOrders,count+1):StringFormat("%s PRIMARY SELL %d",CommentsOrders,count+1);
-   trade.SetExpertMagicNumber(OrdersID);
-   trade.SetTypeFillingBySymbol(SymbolTrade);
-   bool ok=(type==ORDER_TYPE_BUY)?trade.Buy(lot,SymbolTrade,0,0,0,c):trade.Sell(lot,SymbolTrade,0,0,0,c);
-   if(ok && TradeOK()) return true;
-   PrintFormat("V16 PRIMARY FAILED retcode=%u | %s",trade.ResultRetcode(),trade.ResultRetcodeDescription());
-   return false;
-}
-
-//+------------------------------------------------------------------+
-//| FUNCTION: ManageBasketExit                                      |
-//+------------------------------------------------------------------+
-void ManageBasketExit(){
-   UpdateStatus();
-   int total=BuyOrders+SellOrders+((RecoveryStage>0)?1:0)+((RecoveryStage>1)?1:0);
-   if(total==0){ BasketPeakProfit=0; BasketTrailingActive=false; return; }
-   double p=BasketProfitValue;
-   if(UseTrailingProfit){
-      double arm=MathMax(TargetProfitUSD,TrailingStartUSD);
-      if(!BasketTrailingActive && p>=arm){
-         BasketTrailingActive=true; BasketPeakProfit=p;
-         PrintFormat("V16 BASKET TARGET REACHED -> TRAILING ON | basket=%.2f | stage=%d",p,RecoveryStage);
-      }
-      if(BasketTrailingActive){
-         if(p>BasketPeakProfit) BasketPeakProfit=p;
-         if(p<=BasketPeakProfit-TrailingStopUSD){
-            PrintFormat("V16 BASKET TRAILING CLOSE | peak=%.2f | current=%.2f | stage=%d",BasketPeakProfit,p,RecoveryStage);
-            DeleteRecoveryPending(); CloseBasket();
-         }
-      }
-   }
-   else if(p>=TargetProfitUSD){ DeleteRecoveryPending(); CloseBasket(); }
-}
-
-//+------------------------------------------------------------------+
-//| FUNCTION: CloseAllExposure                                      |
-//+------------------------------------------------------------------+
-void CloseAllExposure(){
-   for(int i=OrdersTotal()-1;i>=0;i--){
-      ulong ticket=OrderGetTicket(i);
-      if(!IsOurOrder(ticket)) continue;
-      trade.OrderDelete(ticket);
-   }
-   for(int i=PositionsTotal()-1;i>=0;i--){
-      ulong ticket=PositionGetTicket(i);
-      if(!IsOurPosition(ticket)) continue;
-      trade.PositionClose(ticket);
-   }
-   BasketPeakProfit=0; BasketTrailingActive=false;
-}
-
-//+------------------------------------------------------------------+
-//| FUNCTION: CloseBasket                                           |
-//+------------------------------------------------------------------+
-void CloseBasket(){
-   for(int i=PositionsTotal()-1;i>=0;i--){
-      ulong ticket=PositionGetTicket(i);
-      if(!IsOurPosition(ticket)) continue;
-      trade.PositionClose(ticket);
-   }
-   BasketPeakProfit=0; BasketTrailingActive=false;
-}
-
-//+------------------------------------------------------------------+
-//| FUNCTION: DisplayDashboard                                      |
-//+------------------------------------------------------------------+
-void DisplayDashboard(double dd){
-   string state="IDLE";
-   if(RecoveryStage==2) state="RECOVERY 2 ACTIVE";
-   else if(RecoveryStage==1) state="RECOVERY 1 ACTIVE";
-   else if(BuyOrders>0) state=(BuyProfit>0?"PRIMARY BUY / PROFIT MODE":"PRIMARY BUY / LOSS MODE");
-   else if(SellOrders>0) state=(SellProfit>0?"PRIMARY SELL / PROFIT MODE":"PRIMARY SELL / LOSS MODE");
-
-   Comment("===== GRID 06 V16 =====\n",
-           "State: ",state,"\n",
-           "BASKET P/L: ",DoubleToString(BasketProfitValue,2),"\n",
-           "BUY: ",BuyOrders," | lot=",DoubleToString(BuyLots,2)," | P/L=",DoubleToString(BuyProfit,2),"\n",
-           "SELL: ",SellOrders," | lot=",DoubleToString(SellLots,2)," | P/L=",DoubleToString(SellProfit,2),"\n",
-           "Loss Gap: ",DoubleToString(PointsForFirstGap,0)," | Mult: ",DoubleToString(GapMultiplier,2),"\n",
-           "Profit Gap: ",DoubleToString(PointsForProfitGap,0)," | Profit Mode: ",(EnableProfitDirection?"ON":"OFF"),"\n",
-           "R1: ",(RecoveryStage>=1?"ACTIVE":"OFF")," | lot=",DoubleToString(Recovery1Lots,2)," | P/L=",DoubleToString(Recovery1Profit,2),"\n",
-           "R2: ",(RecoveryStage>=2?"ACTIVE":"OFF")," | lot=",DoubleToString(Recovery2Lots,2)," | P/L=",DoubleToString(Recovery2Profit,2),"\n",
-           "Target: ",DoubleToString(TargetProfitUSD,2)," | Trail: ",(BasketTrailingActive?"ON":"OFF")," | Peak: ",DoubleToString(BasketPeakProfit,2),"\n",
-           "NEWS: ",NewsStatusText(),"\n",
-           "ACTIVE NEWS: ",(ActiveNewsTime>0?ActiveNewsName:"NONE"),"\n",
-           "NEXT NEWS: ",NewsNextText(),"\n",
-           "DD: ",DoubleToString(dd,2),"%");
-}
-
+void ManageBasketExit(){UpdateStatus();int total=BuyOrders+SellOrders+((RecoveryStage>0)?1:0)+((RecoveryStage>1)?1:0);if(total==0){BasketPeakProfit=0;BasketTrailingActive=false;return;}double p=BasketProfitValue;if(UseTrailingProfit){double arm=MathMax(TargetProfitUSD,TrailingStartUSD);if(!BasketTrailingActive&&p>=arm){BasketTrailingActive=true;BasketPeakProfit=p;PrintFormat("V16 BASKET TARGET REACHED -> TRAILING ON | basket=%.2f | stage=%d",p,RecoveryStage);}if(BasketTrailingActive){if(p>BasketPeakProfit)BasketPeakProfit=p;if(p<=BasketPeakProfit-TrailingStopUSD){PrintFormat("V16 BASKET TRAILING CLOSE | peak=%.2f | current=%.2f | stage=%d",BasketPeakProfit,p,RecoveryStage);DeleteRecoveryPending();CloseBasket();}}}else if(p>=TargetProfitUSD){DeleteRecoveryPending();CloseBasket();}}
+void CloseAllExposure(){for(int i=OrdersTotal()-1;i>=0;i--){ulong ticket=OrderGetTicket(i);if(!IsOurOrder(ticket))continue;trade.OrderDelete(ticket);}for(int i=PositionsTotal()-1;i>=0;i--){ulong ticket=PositionGetTicket(i);if(!IsOurPosition(ticket))continue;trade.PositionClose(ticket);}BasketPeakProfit=0;BasketTrailingActive=false;}
+void CloseBasket(){for(int i=PositionsTotal()-1;i>=0;i--){ulong ticket=PositionGetTicket(i);if(!IsOurPosition(ticket))continue;trade.PositionClose(ticket);}BasketPeakProfit=0;BasketTrailingActive=false;}
+void DisplayDashboard(double dd){string state="IDLE";if(RecoveryStage==2)state="RECOVERY 2 ACTIVE";else if(RecoveryStage==1)state="RECOVERY 1 ACTIVE";else if(BuyOrders>0)state=(BuyProfit>0?"PRIMARY BUY / PROFIT MODE":"PRIMARY BUY / LOSS MODE");else if(SellOrders>0)state=(SellProfit>0?"PRIMARY SELL / PROFIT MODE":"PRIMARY SELL / LOSS MODE");Comment("===== GRID 06 V16 =====\n","State: ",state,"\n","BASKET P/L: ",DoubleToString(BasketProfitValue,2),"\n","BUY: ",BuyOrders," | lot=",DoubleToString(BuyLots,2)," | P/L=",DoubleToString(BuyProfit,2),"\n","SELL: ",SellOrders," | lot=",DoubleToString(SellLots,2)," | P/L=",DoubleToString(SellProfit,2),"\n","Max Primary Orders: ",MaxOrders,"\n","Recovery Trigger: after PRIMARY #",MaxOrders,"\n","Loss Gap: ",DoubleToString(PointsForFirstGap,0)," | Mult: ",DoubleToString(GapMultiplier,2),"\n","Profit Gap: ",DoubleToString(PointsForProfitGap,0)," | Profit Mode: ",(EnableProfitDirection?"ON":"OFF"),"\n","R1: ",(RecoveryStage>=1?"ACTIVE":"OFF")," | lot=",DoubleToString(Recovery1Lots,2)," | P/L=",DoubleToString(Recovery1Profit,2),"\n","R2: ",(RecoveryStage>=2?"ACTIVE":"OFF")," | lot=",DoubleToString(Recovery2Lots,2)," | P/L=",DoubleToString(Recovery2Profit,2),"\n","Target: ",DoubleToString(TargetProfitUSD,2)," | Trail: ",(BasketTrailingActive?"ON":"OFF")," | Peak: ",DoubleToString(BasketPeakProfit,2),"\n","NEWS: ",NewsStatusText(),"\n","ACTIVE NEWS: ",(ActiveNewsTime>0?ActiveNewsName:"NONE"),"\n","NEXT NEWS: ",NewsNextText(),"\n","DD: ",DoubleToString(dd,2),"%");}
 //+------------------------------------------------------------------+
 //| END GRID 06 V16                                                  |
 //+------------------------------------------------------------------+
