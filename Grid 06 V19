@@ -329,7 +329,7 @@ void CreateDashboardLabel(string name,
    ObjectSetInteger(0,name,OBJPROP_ANCHOR,anchor);
    ObjectSetInteger(0,name,OBJPROP_XDISTANCE,x);
    ObjectSetInteger(0,name,OBJPROP_YDISTANCE,y);
-   ObjectSetInteger(0,name,OBJPROP_FONTSIZE,12);
+   ObjectSetInteger(0,name,OBJPROP_FONTSIZE,8);
    ObjectSetInteger(0,name,OBJPROP_COLOR,textColor);
    ObjectSetString(0,name,OBJPROP_FONT,"Calibri");
    ObjectSetString(0,name,OBJPROP_TEXT,text);
@@ -472,43 +472,29 @@ void DisplayDashboard(double dd)
    CreateDashboardLabel(DASH_PREFIX+"VERSION","V19.01  |  PROFIT DIRECTION + DYNAMIC RECOVERY + NEWS",x,y+line,12,clrWhite);
    CreateDashboardLabel(DASH_PREFIX+"SYMBOL","SYMBOL : "+SymbolTrade+"   |   TF : "+EnumToString((ENUM_TIMEFRAMES)_Period),x,y+(line*2),12,clrWhite);
    CreateDashboardLabel(DASH_PREFIX+"RUNNING","EA STATUS : RUNNING",rightX,y+(line*2),12,clrLime);
-   CreateDashboardDivider(DASH_PREFIX+"DIV_HEADER",x,y+(line*3)-8,800,clrOrange);
-
    CreateDashboardLabel(DASH_PREFIX+"TIME","STRATEGY TIME (WIB) : "+TimeToString(GetStrategyTime(),TIME_DATE|TIME_SECONDS),x,y+(line*4),12,clrWhite);
    CreateDashboardLabel(DASH_PREFIX+"HOURS","TRADING HOURS (WIB) : "+IntegerToString(StartHour)+" - "+IntegerToString(EndHour)+"   |   SESSION = "+(IsTradingHour()?"OPEN":"CLOSED"),x,y+(line*5),12,IsTradingHour()?clrLime:clrYellow);
    CreateDashboardLabel(DASH_PREFIX+"STATE_TEXT","CURRENT STATE",x,y+(line*6),12,clrWhite);
    CreateDashboardStatePill(DASH_PREFIX+"STATE",state,x+155,y+(line*6)-7,625,28,stateColor,clrWhite);
-   CreateDashboardDivider(DASH_PREFIX+"DIV_STATE",x,y+(line*7)+5,800,clrOrange);
-
    CreateDashboardLabel(DASH_PREFIX+"BASKET","BASKET P/L : "+DoubleToString(floating,2)+" USD",x,y+(line*8),12,basketColor);
    CreateDashboardLabel(DASH_PREFIX+"DAILY","DAILY P/L : "+DoubleToString(dailyProfit,2)+" / "+DoubleToString(DailyTargetProfitUSD,2)+" USD   | TARGET = "+(EnableDailyTarget?"ON":"OFF"),x,y+(line*9),12,dailyColor);
    CreateDashboardLabel(DASH_PREFIX+"BALANCE","BALANCE : "+DoubleToString(balance,2)+"   | EQUITY : "+DoubleToString(equity,2),x,y+(line*10),12,clrWhite);
-   CreateDashboardDivider(DASH_PREFIX+"DIV_PROFIT",x,y+(line*11)+5,800,clrOrange);
-
    CreateDashboardLabel(DASH_PREFIX+"BUY","BUY  : "+IntegerToString(BuyOrders)+"   | LOT = "+DoubleToString(BuyLots,2)+"   | P/L = "+DoubleToString(BuyProfit,2),x,y+(line*12),12,buyColor);
    CreateDashboardLabel(DASH_PREFIX+"SELL","SELL : "+IntegerToString(SellOrders)+"   | LOT = "+DoubleToString(SellLots,2)+"   | P/L = "+DoubleToString(SellProfit,2),x,y+(line*13),12,sellColor);
    CreateDashboardLabel(DASH_PREFIX+"GRID","GRID : MAX PRIMARY = "+IntegerToString(MaxOrders)+"   | LOSS GAP = "+DoubleToString(PointsForFirstGap,0)+"   | MULT = "+DoubleToString(GapMultiplier,2),x,y+(line*14),12,clrWhite);
    CreateDashboardLabel(DASH_PREFIX+"PROFITGAP","PROFIT DIRECTION : "+(EnableProfitDirection?"ON":"OFF")+"   | GAP = "+DoubleToString(PointsForProfitGap,0),x,y+(line*15),12,clrWhite);
-   CreateDashboardDivider(DASH_PREFIX+"DIV_GRID",x,y+(line*16)+5,800,clrOrange);
-
    color r1Color=(RecoveryStage>=1)?clrYellow:clrSilver;
    color r2Color=(RecoveryStage>=2)?clrRed:clrSilver;
    CreateDashboardLabel(DASH_PREFIX+"R1","RECOVERY 1 : "+(RecoveryStage>=1?"ACTIVE":"OFF")+"   | LOT = "+DoubleToString(Recovery1Lots,2)+"   | P/L = "+DoubleToString(Recovery1Profit,2),x,y+(line*17),12,r1Color);
    CreateDashboardLabel(DASH_PREFIX+"R2","RECOVERY 2 : "+(RecoveryStage>=2?"ACTIVE":"OFF")+"   | LOT = "+DoubleToString(Recovery2Lots,2)+"   | P/L = "+DoubleToString(Recovery2Profit,2),x,y+(line*18),12,r2Color);
    CreateDashboardLabel(DASH_PREFIX+"RECOVERYCFG","RECOVERY TRIGGER : AFTER PRIMARY #"+IntegerToString(MaxOrders)+"   | ANCHOR = LAST PRIMARY",x,y+(line*19),12,clrWhite);
    CreateDashboardLabel(DASH_PREFIX+"RECOVERYSET","R1 MULT/GAP : "+DoubleToString(Recovery1Multiplier,2)+" / "+DoubleToString(Recovery1GapPoints,0)+"   | R2 MULT/GAP : "+DoubleToString(Recovery2Multiplier,2)+" / "+DoubleToString(Recovery2GapPoints,0),x,y+(line*20),12,clrWhite);
-   CreateDashboardDivider(DASH_PREFIX+"DIV_RECOVERY",x,y+(line*21)+5,800,clrOrange);
-
    CreateDashboardLabel(DASH_PREFIX+"TARGET","BASKET TARGET : "+DoubleToString(TargetProfitUSD,2)+" USD   | TRAIL = "+(BasketTrailingActive?"ON":"OFF")+"   | PEAK = "+DoubleToString(BasketPeakProfit,2),x,y+(line*22),12,clrWhite);
    CreateDashboardLabel(DASH_PREFIX+"TRAILSET","TRAIL START : "+DoubleToString(TrailingStartUSD,2)+"   | TRAIL STOP : "+DoubleToString(TrailingStopUSD,2),x,y+(line*23),12,clrWhite);
    CreateDashboardLabel(DASH_PREFIX+"DD","EQUITY DD : "+DoubleToString(dd,2)+"%   | MAX DD STOP : "+DoubleToString(MaxEquityLossPercent,2)+"%",x,y+(line*24),12,ddColor);
-   CreateDashboardDivider(DASH_PREFIX+"DIV_RISK",x,y+(line*25)+5,800,clrOrange);
-
    CreateDashboardLabel(DASH_PREFIX+"NEWS","NEWS : "+NewsStatusText()+"   | "+NewsCurrency+"   | HIGH IMPACT = "+(NewsHighImpactOnly?"ON":"OFF"),x,y+(line*26),12,newsColor);
    CreateDashboardLabel(DASH_PREFIX+"NEXTNEWS","NEXT NEWS : "+NewsNextText(),x,y+(line*27),12,clrWhite);
    CreateDashboardLabel(DASH_PREFIX+"NEWSRULE","BLOCK ENTRY / GRID / RECOVERY : "+(BlockNewEntries?"ON":"OFF")+" / "+(BlockGridExpansion?"ON":"OFF")+" / "+(BlockRecovery?"ON":"OFF"),x,y+(line*28),12,clrWhite);
-   CreateDashboardDivider(DASH_PREFIX+"DIV_NEWS",x,y+(line*29)+5,800,clrOrange);
-
    CreateDashboardLabel(DASH_PREFIX+"MAGIC","MAGIC : "+IntegerToString(OrdersID)+"   |   COMMENT : "+CommentsOrders,x,y+(line*30),12,clrWhite);
    CreateDashboardLabel(DASH_PREFIX+"TZ","SERVER UTC : "+DoubleToString(ServerUTCOffsetHours,1)+"   | STRATEGY UTC : "+DoubleToString(StrategyUTCOffsetHours,1)+" (WIB)",x,y+(line*31),12,clrSilver);
    CreateDashboardLabel(DASH_PREFIX+"TARGETSTATUS","DAILY TARGET STATUS : "+(DailyTargetReached?"LOCKED UNTIL NEXT WIB DAY":"ACTIVE"),x,y+(line*32),12,DailyTargetReached?clrRed:clrLime);
