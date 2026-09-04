@@ -1,0 +1,20 @@
+//+------------------------------------------------------------------+
+//| GRID 06 V18 - DAILY TARGET EDITION                              |
+//|                                                                  |
+//| Standalone launcher for GRID 06 V15.02.                          |
+//| V15.02 contains the Daily Target Profit engine:                  |
+//| - DailyTargetProfitUSD                                            |
+//| - realized + floating daily P/L                                  |
+//| - close all exposure when target is reached                      |
+//| - lock trading until the next broker/server day                  |
+//|                                                                  |
+//| IMPORTANT: Keep "Grid 06 V15" in the same MQL5 folder.           |
+//| V18 intentionally reuses the audited V15.02 engine so no other   |
+//| trading logic is changed.                                        |
+//+------------------------------------------------------------------+
+
+#include "Grid 06 V15"
+
+// V18 uses the complete V15.02 engine above.
+// The included source is the EA entry point and contains OnInit(),
+// OnTick(), all inputs, grid, recovery, trailing and daily target logic.
