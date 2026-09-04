@@ -119,6 +119,9 @@ bool IsTerminated=false;
 double InitialBalance=0;
 double HighWaterMark=0;
 
+//================ DASHBOARD =================//
+string DASH_PREFIX = "GRID06_V18_DASH_";
+
 // Daily target state - all strategy-day references use WIB (UTC+7 by default).
 int DailyTargetYear=0;
 int DailyTargetDayOfYear=0;
@@ -330,6 +333,7 @@ int OnInit(){
 void OnDeinit(const int reason){
    IndicatorRelease(HandleRSI);
    IndicatorRelease(HandleMA);
+   DeleteDashboard();
    Comment("");
 }
 
@@ -797,33 +801,395 @@ void CloseBasket(){
 }
 
 //+------------------------------------------------------------------+
-//| FUNCTION: DisplayDashboard                                      |
+//| FUNCTION: CreateDashboardLabel                                   |
 //+------------------------------------------------------------------+
-void DisplayDashboard(double dd){
+void CreateDashboardLabel(string name,
+                          string text,
+                          int x,
+                          int y,
+                          int fontSize,
+                          color textColor)
+{
+   if(ObjectFind(0,name)<0)
+   {
+      if(!ObjectCreate(0,name,OBJ_LABEL,0,0,0))
+         return;
+
+      ObjectSetInteger(0,name,OBJPROP_CORNER,CORNER_LEFT_UPPER);
+      ObjectSetInteger(0,name,OBJPROP_ANCHOR,ANCHOR_LEFT_UPPER);
+      ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
+      ObjectSetInteger(0,name,OBJPROP_SELECTED,false);
+      ObjectSetInteger(0,name,OBJPROP_HIDDEN,true);
+      ObjectSetInteger(0,name,OBJPROP_ZORDER,10);
+   }
+
+   ObjectSetInteger(0,name,OBJPROP_XDISTANCE,x);
+   ObjectSetInteger(0,name,OBJPROP_YDISTANCE,y);
+   ObjectSetInteger(0,name,OBJPROP_FONTSIZE,fontSize);
+   ObjectSetInteger(0,name,OBJPROP_COLOR,textColor);
+   ObjectSetString(0,name,OBJPROP_FONT,"Arial Bold");
+   ObjectSetString(0,name,OBJPROP_TEXT,text);
+}
+
+//+------------------------------------------------------------------+
+//| FUNCTION: CreateDashboardPanel                                   |
+//+------------------------------------------------------------------+
+void CreateDashboardPanel()
+{
+   string name=DASH_PREFIX+"BG";
+
+   if(ObjectFind(0,name)<0)
+   {
+      if(!ObjectCreate(0,name,OBJ_RECTANGLE_LABEL,0,0,0))
+         return;
+
+      ObjectSetInteger(0,name,OBJPROP_CORNER,CORNER_LEFT_UPPER);
+      ObjectSetInteger(0,name,OBJPROP_XDISTANCE,10);
+      ObjectSetInteger(0,name,OBJPROP_YDISTANCE,20);
+      ObjectSetInteger(0,name,OBJPROP_XSIZE,430);
+      ObjectSetInteger(0,name,OBJPROP_YSIZE,445);
+
+      // Orange panel with approximately 50% alpha transparency.
+      ObjectSetInteger(0,name,OBJPROP_BGCOLOR,ColorToARGB(clrOrange,128));
+      ObjectSetInteger(0,name,OBJPROP_COLOR,clrOrange);
+      ObjectSetInteger(0,name,OBJPROP_BORDER_TYPE,BORDER_FLAT);
+      ObjectSetInteger(0,name,OBJPROP_WIDTH,2);
+
+      ObjectSetInteger(0,name,OBJPROP_BACK,false);
+      ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
+      ObjectSetInteger(0,name,OBJPROP_SELECTED,false);
+      ObjectSetInteger(0,name,OBJPROP_HIDDEN,true);
+      ObjectSetInteger(0,name,OBJPROP_ZORDER,0);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| FUNCTION: DeleteDashboard                                        |
+//+------------------------------------------------------------------+
+void DeleteDashboard()
+{
+   for(int i=ObjectsTotal(0,-1,-1)-1;i>=0;i--)
+   {
+      string name=ObjectName(0,i,-1,-1);
+
+      if(StringFind(name,DASH_PREFIX)==0)
+         ObjectDelete(0,name);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| FUNCTION: DisplayDashboard                                       |
+//+------------------------------------------------------------------+
+void DisplayDashboard(double dd)
+{
+   CreateDashboardPanel();
+
    string state="IDLE";
-   if(DailyTargetReached) state="DAILY TARGET REACHED - LOCKED";
-   else if(RecoveryStage==2) state="RECOVERY 2 ACTIVE";
-   else if(RecoveryStage==1) state="RECOVERY 1 ACTIVE";
-   else if(BuyOrders>0) state=(BuyProfit>0?"PRIMARY BUY / PROFIT MODE":"PRIMARY BUY / LOSS MODE");
-   else if(SellOrders>0) state=(SellProfit>0?"PRIMARY SELL / PROFIT MODE":"PRIMARY SELL / LOSS MODE");
+   color stateColor=clrWhite;
+
+   if(DailyTargetReached)
+   {
+      state="DAILY TARGET REACHED - LOCKED";
+      stateColor=clrRed;
+   }
+   else if(RecoveryStage==2)
+   {
+      state="RECOVERY 2 ACTIVE";
+      stateColor=clrRed;
+   }
+   else if(RecoveryStage==1)
+   {
+      state="RECOVERY 1 ACTIVE";
+      stateColor=clrYellow;
+   }
+   else if(BuyOrders>0)
+   {
+      if(BuyProfit>0)
+      {
+         state="PRIMARY BUY / PROFIT MODE";
+         stateColor=clrLime;
+      }
+      else
+      {
+         state="PRIMARY BUY / LOSS MODE";
+         stateColor=clrRed;
+      }
+   }
+   else if(SellOrders>0)
+   {
+      if(SellProfit>0)
+      {
+         state="PRIMARY SELL / PROFIT MODE";
+         stateColor=clrLime;
+      }
+      else
+      {
+         state="PRIMARY SELL / LOSS MODE";
+         stateColor=clrRed;
+      }
+   }
 
    double dailyProfit=GetDailyProfit();
 
-   Comment("===== GRID 06 V18 =====\n",
-           "Strategy Time (WIB): ",TimeToString(GetStrategyTime(),TIME_DATE|TIME_SECONDS),"\n",
-           "Trading Hours (WIB): ",StartHour,"-",EndHour,"\n",
-           "State: ",state,"\n",
-           "BASKET P/L: ",DoubleToString(BasketProfitValue,2),"\n",
-           "DAILY P/L: ",DoubleToString(dailyProfit,2)," / ",DoubleToString(DailyTargetProfitUSD,2)," | Daily Target: ",(EnableDailyTarget?"ON":"OFF"),"\n",
-           "BUY: ",BuyOrders," | lot=",DoubleToString(BuyLots,2)," | P/L=",DoubleToString(BuyProfit,2),"\n",
-           "SELL: ",SellOrders," | lot=",DoubleToString(SellLots,2)," | P/L=",DoubleToString(SellProfit,2),"\n",
-           "Loss Gap: ",DoubleToString(PointsForFirstGap,0)," | Mult: ",DoubleToString(GapMultiplier,2),"\n",
-           "Profit Gap: ",DoubleToString(PointsForProfitGap,0)," | Profit Mode: ",(EnableProfitDirection?"ON":"OFF"),"\n",
-           "R1: ",(RecoveryStage>=1?"ACTIVE":"OFF")," | lot=",DoubleToString(Recovery1Lots,2)," | P/L=",DoubleToString(Recovery1Profit,2),"\n",
-           "R2: ",(RecoveryStage>=2?"ACTIVE":"OFF")," | lot=",DoubleToString(Recovery2Lots,2)," | P/L=",DoubleToString(Recovery2Profit,2),"\n",
-           "Target: ",DoubleToString(TargetProfitUSD,2)," | Trail: ",(BasketTrailingActive?"ON":"OFF")," | Peak: ",DoubleToString(BasketPeakProfit,2),"\n",
-           "DD: ",DoubleToString(dd,2),"%\n",
-           "Server UTC Offset: ",DoubleToString(ServerUTCOffsetHours,1)," | Strategy UTC Offset: ",DoubleToString(StrategyUTCOffsetHours,1));
+   //==============================================================//
+   // PANEL POSITION
+   //==============================================================//
+   int x=28;
+   int y=30;
+   int line=25;
+
+   //==============================================================//
+   // TITLE
+   //==============================================================//
+   CreateDashboardLabel(
+      DASH_PREFIX+"TITLE",
+      "GRID 06 V18",
+      x,
+      y,
+      18,
+      clrWhite
+   );
+
+   //==============================================================//
+   // SUBTITLE
+   //==============================================================//
+   CreateDashboardLabel(
+      DASH_PREFIX+"SUBTITLE",
+      "PROFIT DIRECTION + TWO-STAGE RECOVERY",
+      x,
+      y+27,
+      9,
+      clrWhite
+   );
+
+   //==============================================================//
+   // TIME
+   //==============================================================//
+   CreateDashboardLabel(
+      DASH_PREFIX+"TIME",
+      "Strategy Time (WIB) : "+
+      TimeToString(GetStrategyTime(),TIME_DATE|TIME_SECONDS),
+      x,
+      y+(line*3),
+      10,
+      clrWhite
+   );
+
+   CreateDashboardLabel(
+      DASH_PREFIX+"HOURS",
+      "Trading Hours (WIB) : "+
+      IntegerToString(StartHour)+" - "+
+      IntegerToString(EndHour),
+      x,
+      y+(line*4),
+      10,
+      clrWhite
+   );
+
+   //==============================================================//
+   // STATE
+   //==============================================================//
+   CreateDashboardLabel(
+      DASH_PREFIX+"STATE",
+      "STATE : "+state,
+      x,
+      y+(line*5),
+      11,
+      stateColor
+   );
+
+   //==============================================================//
+   // BASKET P/L
+   //==============================================================//
+   color basketColor=(BasketProfitValue>=0)?clrLime:clrRed;
+
+   CreateDashboardLabel(
+      DASH_PREFIX+"BASKET",
+      "BASKET P/L : "+
+      DoubleToString(BasketProfitValue,2)+" USD",
+      x,
+      y+(line*6),
+      12,
+      basketColor
+   );
+
+   //==============================================================//
+   // DAILY P/L
+   //==============================================================//
+   color dailyColor=(dailyProfit>=0)?clrLime:clrRed;
+
+   CreateDashboardLabel(
+      DASH_PREFIX+"DAILY",
+      "DAILY P/L   : "+
+      DoubleToString(dailyProfit,2)+
+      " / "+
+      DoubleToString(DailyTargetProfitUSD,2)+
+      " USD   ["+
+      (EnableDailyTarget?"ON":"OFF")+
+      "]",
+      x,
+      y+(line*7),
+      11,
+      dailyColor
+   );
+
+   //==============================================================//
+   // BUY
+   //==============================================================//
+   color buyColor=(BuyProfit>=0)?clrLime:clrRed;
+
+   CreateDashboardLabel(
+      DASH_PREFIX+"BUY",
+      "BUY   : "+
+      IntegerToString(BuyOrders)+
+      "   | LOT = "+
+      DoubleToString(BuyLots,2)+
+      "   | P/L = "+
+      DoubleToString(BuyProfit,2),
+      x,
+      y+(line*8),
+      10,
+      buyColor
+   );
+
+   //==============================================================//
+   // SELL
+   //==============================================================//
+   color sellColor=(SellProfit>=0)?clrLime:clrRed;
+
+   CreateDashboardLabel(
+      DASH_PREFIX+"SELL",
+      "SELL  : "+
+      IntegerToString(SellOrders)+
+      "   | LOT = "+
+      DoubleToString(SellLots,2)+
+      "   | P/L = "+
+      DoubleToString(SellProfit,2),
+      x,
+      y+(line*9),
+      10,
+      sellColor
+   );
+
+   //==============================================================//
+   // GRID SETTINGS
+   //==============================================================//
+   CreateDashboardLabel(
+      DASH_PREFIX+"LOSSGAP",
+      "LOSS GAP   : "+
+      DoubleToString(PointsForFirstGap,0)+
+      "   | MULT = "+
+      DoubleToString(GapMultiplier,2),
+      x,
+      y+(line*10),
+      10,
+      clrWhite
+   );
+
+   CreateDashboardLabel(
+      DASH_PREFIX+"PROFITGAP",
+      "PROFIT GAP : "+
+      DoubleToString(PointsForProfitGap,0)+
+      "   | MODE = "+
+      (EnableProfitDirection?"ON":"OFF"),
+      x,
+      y+(line*11),
+      10,
+      clrWhite
+   );
+
+   //==============================================================//
+   // RECOVERY 1
+   //==============================================================//
+   color r1Color=(RecoveryStage>=1)?clrYellow:clrSilver;
+
+   CreateDashboardLabel(
+      DASH_PREFIX+"R1",
+      "RECOVERY 1 : "+
+      (RecoveryStage>=1?"ACTIVE":"OFF")+
+      "   | LOT = "+
+      DoubleToString(Recovery1Lots,2)+
+      "   | P/L = "+
+      DoubleToString(Recovery1Profit,2),
+      x,
+      y+(line*12),
+      10,
+      r1Color
+   );
+
+   //==============================================================//
+   // RECOVERY 2
+   //==============================================================//
+   color r2Color=(RecoveryStage>=2)?clrRed:clrSilver;
+
+   CreateDashboardLabel(
+      DASH_PREFIX+"R2",
+      "RECOVERY 2 : "+
+      (RecoveryStage>=2?"ACTIVE":"OFF")+
+      "   | LOT = "+
+      DoubleToString(Recovery2Lots,2)+
+      "   | P/L = "+
+      DoubleToString(Recovery2Profit,2),
+      x,
+      y+(line*13),
+      10,
+      r2Color
+   );
+
+   //==============================================================//
+   // TARGET / TRAILING
+   //==============================================================//
+   CreateDashboardLabel(
+      DASH_PREFIX+"TARGET",
+      "TARGET : "+
+      DoubleToString(TargetProfitUSD,2)+
+      " USD   | TRAIL = "+
+      (BasketTrailingActive?"ON":"OFF")+
+      "   | PEAK = "+
+      DoubleToString(BasketPeakProfit,2),
+      x,
+      y+(line*14),
+      10,
+      clrWhite
+   );
+
+   //==============================================================//
+   // EQUITY DD
+   //==============================================================//
+   color ddColor=clrLime;
+
+   if(dd>=50.0)
+      ddColor=clrRed;
+   else if(dd>=20.0)
+      ddColor=clrYellow;
+
+   CreateDashboardLabel(
+      DASH_PREFIX+"DD",
+      "EQUITY DD : "+
+      DoubleToString(dd,2)+"%",
+      x,
+      y+(line*15),
+      11,
+      ddColor
+   );
+
+   //==============================================================//
+   // TIMEZONE
+   //==============================================================//
+   CreateDashboardLabel(
+      DASH_PREFIX+"TZ",
+      "SERVER UTC : "+
+      DoubleToString(ServerUTCOffsetHours,1)+
+      "   |   STRATEGY UTC : "+
+      DoubleToString(StrategyUTCOffsetHours,1)+
+      " (WIB)",
+      x,
+      y+(line*16),
+      9,
+      clrSilver
+   );
+
+   ChartRedraw();
 }
 
 //+------------------------------------------------------------------+
