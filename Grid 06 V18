@@ -1,11 +1,11 @@
 //+------------------------------------------------------------------+
-//| GRID 06.V15 - PROFIT DIRECTION + TWO-STAGE RECOVERY             |
+//| GRID 06.V18 - PROFIT DIRECTION + TWO-STAGE RECOVERY             |
 //| V12 base logic preserved; profit-side pyramiding added          |
 //| Loss grid and Recovery 1/2 remain independent and unchanged     |
 //| Daily target lock added: server-day realized+floating P/L       |
 //+------------------------------------------------------------------+
 #property strict
-#property version "15.02"
+#property version "18.00"
 
 #include <Trade/Trade.mqh>
 CTrade trade;
@@ -62,7 +62,7 @@ input int    EndHour                = 22;
 
 //================ ENGINE =================//
 input int    MagicNumber            = 16082016;
-input string CommentsOrders         = "GRID 06 V15";
+input string CommentsOrders         = "GRID 06 V18";
 
 string SymbolTrade;
 int OrdersID,HandleRSI,HandleMA;
@@ -121,7 +121,7 @@ void ResetDailyTargetIfNewDay(){
    DailyStartBalance=AccountInfoDouble(ACCOUNT_BALANCE);
    DailyTargetReached=false;
 
-   PrintFormat("V15 DAILY RESET | server=%s | startBalance=%.2f",
+   PrintFormat("V18 DAILY RESET | server=%s | startBalance=%.2f",
                TimeToString(TimeCurrent(),TIME_DATE|TIME_SECONDS),DailyStartBalance);
 }
 
@@ -185,7 +185,7 @@ void LockDailyTarget(){
    CloseAllExposure();
    UpdateStatus();
 
-   PrintFormat("V15 DAILY TARGET REACHED | target=%.2f | dailyProfit=%.2f | server=%s | trading locked until next server day",
+   PrintFormat("V18 DAILY TARGET REACHED | target=%.2f | dailyProfit=%.2f | server=%s | trading locked until next server day",
                DailyTargetProfitUSD,GetDailyProfit(),
                TimeToString(TimeCurrent(),TIME_DATE|TIME_SECONDS));
 }
@@ -528,10 +528,10 @@ void ManageRecoveryStage1(ENUM_POSITION_TYPE primaryType){
    }
 
    if(ok && TradeOK())
-      PrintFormat("V15 R1 OPEN | primary=%s | basket=%.2f | primaryLots=%.2f | R1Lot=%.2f | adverse=%.0f",
+      PrintFormat("V18 R1 OPEN | primary=%s | basket=%.2f | primaryLots=%.2f | R1Lot=%.2f | adverse=%.0f",
                   primaryType==POSITION_TYPE_BUY?"BUY":"SELL",basketBefore,primaryLots,lot,adversePoints);
    else
-      PrintFormat("V15 R1 FAILED | basket=%.2f | lot=%.2f | retcode=%u | %s",
+      PrintFormat("V18 R1 FAILED | basket=%.2f | lot=%.2f | retcode=%u | %s",
                   basketBefore,lot,trade.ResultRetcode(),trade.ResultRetcodeDescription());
 }
 
@@ -583,16 +583,16 @@ void ManageRecoveryStage2(){
    }
 
    if(ok && TradeOK())
-      PrintFormat("V15 R2 OPEN | basket=%.2f | R1PL=%.2f | R2Lot=%.2f | adverse=%.0f",
+      PrintFormat("V18 R2 OPEN | basket=%.2f | R1PL=%.2f | R2Lot=%.2f | adverse=%.0f",
                   BasketProfitValue,Recovery1Profit,lot,adversePoints);
    else
-      PrintFormat("V15 R2 FAILED | basket=%.2f | lot=%.2f | retcode=%u | %s",
+      PrintFormat("V18 R2 FAILED | basket=%.2f | lot=%.2f | retcode=%u | %s",
                   BasketProfitValue,lot,trade.ResultRetcode(),trade.ResultRetcodeDescription());
 }
 
 //+------------------------------------------------------------------+
 //| FUNCTION: ManagePrimaryGrid                                     |
-//| V15 dual-direction primary grid:                                |
+//| V18 dual-direction primary grid:                                |
 //| 1) PROFIT + SEARAH  -> PointsForProfitGap                        |
 //| 2) LOSS   + MELAWAN -> V12 PointsForFirstGap/GAPMultiplier      |
 //| Profit path is disabled when the primary basket is not positive. |
@@ -691,7 +691,7 @@ bool ExecutePrimary(ENUM_ORDER_TYPE type){
 
    if(ok && TradeOK()) return true;
 
-   PrintFormat("V15 PRIMARY FAILED retcode=%u | %s",trade.ResultRetcode(),trade.ResultRetcodeDescription());
+   PrintFormat("V18 PRIMARY FAILED retcode=%u | %s",trade.ResultRetcode(),trade.ResultRetcodeDescription());
    return false;
 }
 
@@ -717,13 +717,13 @@ void ManageBasketExit(){
       if(!BasketTrailingActive && p>=arm){
          BasketTrailingActive=true;
          BasketPeakProfit=p;
-         PrintFormat("V15 BASKET TARGET REACHED -> TRAILING ON | basket=%.2f | stage=%d",p,RecoveryStage);
+         PrintFormat("V18 BASKET TARGET REACHED -> TRAILING ON | basket=%.2f | stage=%d",p,RecoveryStage);
       }
 
       if(BasketTrailingActive){
          if(p>BasketPeakProfit) BasketPeakProfit=p;
          if(p<=BasketPeakProfit-TrailingStopUSD){
-            PrintFormat("V15 BASKET TRAILING CLOSE | peak=%.2f | current=%.2f | stage=%d",BasketPeakProfit,p,RecoveryStage);
+            PrintFormat("V18 BASKET TRAILING CLOSE | peak=%.2f | current=%.2f | stage=%d",BasketPeakProfit,p,RecoveryStage);
             DeleteRecoveryPending();
             CloseBasket();
          }
@@ -781,7 +781,7 @@ void DisplayDashboard(double dd){
 
    double dailyProfit=GetDailyProfit();
 
-   Comment("===== GRID 06 V15 =====\n",
+   Comment("===== GRID 06 V18 =====\n",
            "State: ",state,"\n",
            "BASKET P/L: ",DoubleToString(BasketProfitValue,2),"\n",
            "DAILY P/L: ",DoubleToString(dailyProfit,2)," / ",DoubleToString(DailyTargetProfitUSD,2)," | Daily Target: ",(EnableDailyTarget?"ON":"OFF"),"\n",
@@ -796,5 +796,5 @@ void DisplayDashboard(double dd){
 }
 
 //+------------------------------------------------------------------+
-//| END GRID 06 V15                                                  |
+//| END GRID 06 V18                                                  |
 //+------------------------------------------------------------------+
