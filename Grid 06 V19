@@ -8,8 +8,6 @@
 // Dashboard: orange 50% alpha, Calibri 12pt, large reference layout.
 // NOTE: This commit uses the complete source supplied in the updated V19 file.
 
-// The complete source is intentionally written below.
-
 #property strict
 #property version "19.01"
 
@@ -228,77 +226,292 @@ void UpdateStatus(){
       if(type==POSITION_TYPE_BUY){BuyOrders++;BuyLots+=lot;BuyProfit+=p;if(tm>=LastBuyTime){LastBuyTime=tm;LastBuyPrice=open;}}
       else if(type==POSITION_TYPE_SELL){SellOrders++;SellLots+=lot;SellProfit+=p;if(tm>=LastSellTime){LastSellTime=tm;LastSellPrice=open;}}
    }
-   RecoveryLots=Recovery1Lots+Recovery2Lots; RecoveryProfit=Recovery1Profit+Recovery2Profit; RecoveryActive=RecoveryStage>0; BasketProfitValue=BuyProfit+SellProfit+RecoveryProfit;
+   RecoveryLots=Recovery1Lots+Recovery2Lots; RecoveryProfit=Recovery1Profit+Recovery2Profit; RecoveryActive=(RecoveryStage>0); BasketProfitValue=BuyProfit+SellProfit+RecoveryProfit;
 }
-bool HasRecoveryPending(){for(int i=OrdersTotal()-1;i>=0;i--){ulong ticket=OrderGetTicket(i);if(!IsOurOrder(ticket))continue;string c=OrderGetString(ORDER_COMMENT);if(StringFind(c,"RECOVERY 1 BUY")>=0||StringFind(c,"RECOVERY 1 SELL")>=0||StringFind(c,"RECOVERY 2 BUY")>=0||StringFind(c,"RECOVERY 2 SELL")>=0)return true;}return false;}
-void DeleteRecoveryPending(){for(int i=OrdersTotal()-1;i>=0;i--){ulong ticket=OrderGetTicket(i);if(!IsOurOrder(ticket))continue;string c=OrderGetString(ORDER_COMMENT);if(StringFind(c,"RECOVERY 1 BUY")<0&&StringFind(c,"RECOVERY 1 SELL")<0&&StringFind(c,"RECOVERY 2 BUY")<0&&StringFind(c,"RECOVERY 2 SELL")<0)continue;trade.OrderDelete(ticket);}}
+bool HasRecoveryPending(){
+   for(int i=OrdersTotal()-1;i>=0;i--){ ulong ticket=OrderGetTicket(i); if(!IsOurOrder(ticket)) continue; string c=OrderGetString(ORDER_COMMENT); if(StringFind(c,"RECOVERY 1 BUY")>=0||StringFind(c,"RECOVERY 1 SELL")>=0||StringFind(c,"RECOVERY 2 BUY")>=0||StringFind(c,"RECOVERY 2 SELL")>=0) return true; }
+   return false;
+}
+void DeleteRecoveryPending(){
+   for(int i=OrdersTotal()-1;i>=0;i--){ ulong ticket=OrderGetTicket(i); if(!IsOurOrder(ticket)) continue; string c=OrderGetString(ORDER_COMMENT); if(StringFind(c,"RECOVERY 1 BUY")<0&&StringFind(c,"RECOVERY 1 SELL")<0&&StringFind(c,"RECOVERY 2 BUY")<0&&StringFind(c,"RECOVERY 2 SELL")<0) continue; trade.OrderDelete(ticket); }
+}
 void ManageRecoveryStage1(ENUM_POSITION_TYPE primaryType){
-   if(!EnableRecovery||RecoveryStage>0||HasRecoveryPending()||MaxRecoveryStages<1)return; double primaryPL=(primaryType==POSITION_TYPE_BUY)?BuyProfit:SellProfit, primaryLots=(primaryType==POSITION_TYPE_BUY)?BuyLots:SellLots, anchorPrice=(primaryType==POSITION_TYPE_BUY)?LastBuyPrice:LastSellPrice; if(RecoveryOnlyWhenMinus&&primaryPL>=0)return; if(primaryLots<=0||anchorPrice<=0)return;
-   double point=SymbolInfoDouble(SymbolTrade,SYMBOL_POINT);if(point<=0)return;double bid=SymbolInfoDouble(SymbolTrade,SYMBOL_BID),ask=SymbolInfoDouble(SymbolTrade,SYMBOL_ASK);double adversePoints=(primaryType==POSITION_TYPE_BUY)?(anchorPrice-bid)/point:(ask-anchorPrice)/point;if(adversePoints<Recovery1GapPoints)return;UpdateStatus();double basketBefore=BasketProfitValue;if(RecoveryOnlyWhenMinus&&basketBefore>=0)return;
-   double lot=NormalizeVolume(primaryLots*Recovery1Multiplier);if(Recovery1MaxLot>0)lot=NormalizeVolume(MathMin(lot,Recovery1MaxLot));if(lot<=0)return;trade.SetExpertMagicNumber(OrdersID);trade.SetTypeFillingBySymbol(SymbolTrade);bool ok=false;string c;
-   if(primaryType==POSITION_TYPE_BUY){c=CommentsOrders+" RECOVERY 1 SELL";ok=trade.Sell(lot,SymbolTrade,0,0,0,c);}else{c=CommentsOrders+" RECOVERY 1 BUY";ok=trade.Buy(lot,SymbolTrade,0,0,0,c);} if(!ok||!TradeOK())PrintFormat("V19 R1 FAILED retcode=%u | %s",trade.ResultRetcode(),trade.ResultRetcodeDescription());
+   if(!EnableRecovery||RecoveryStage>0||HasRecoveryPending()) return; if(MaxRecoveryStages<1) return;
+   double primaryPL=(primaryType==POSITION_TYPE_BUY)?BuyProfit:SellProfit; double primaryLots=(primaryType==POSITION_TYPE_BUY)?BuyLots:SellLots; double anchorPrice=(primaryType==POSITION_TYPE_BUY)?LastBuyPrice:LastSellPrice;
+   if(RecoveryOnlyWhenMinus&&primaryPL>=0.0) return; if(primaryLots<=0||anchorPrice<=0) return;
+   double point=SymbolInfoDouble(SymbolTrade,SYMBOL_POINT); if(point<=0) return; double bid=SymbolInfoDouble(SymbolTrade,SYMBOL_BID),ask=SymbolInfoDouble(SymbolTrade,SYMBOL_ASK);
+   double adversePoints=(primaryType==POSITION_TYPE_BUY)?(anchorPrice-bid)/point:(ask-anchorPrice)/point; if(adversePoints<Recovery1GapPoints) return;
+   UpdateStatus(); double basketBefore=BasketProfitValue; if(RecoveryOnlyWhenMinus&&basketBefore>=0.0) return;
+   double lot=NormalizeVolume(primaryLots*Recovery1Multiplier); if(Recovery1MaxLot>0.0) lot=NormalizeVolume(MathMin(lot,Recovery1MaxLot)); if(lot<=0) return;
+   trade.SetExpertMagicNumber(OrdersID); trade.SetTypeFillingBySymbol(SymbolTrade); bool ok=false; string c;
+   if(primaryType==POSITION_TYPE_BUY){ c=CommentsOrders+" RECOVERY 1 SELL"; ok=trade.Sell(lot,SymbolTrade,0,0,0,c); }
+   else{ c=CommentsOrders+" RECOVERY 1 BUY"; ok=trade.Buy(lot,SymbolTrade,0,0,0,c); }
+   if(ok&&TradeOK()) PrintFormat("V19 R1 OPEN | MaxOrders=%d | primary=%s | basket=%.2f | primaryLots=%.2f | R1Lot=%.2f | adverse=%.0f",MaxOrders,primaryType==POSITION_TYPE_BUY?"BUY":"SELL",basketBefore,primaryLots,lot,adversePoints);
+   else PrintFormat("V19 R1 FAILED | MaxOrders=%d | basket=%.2f | lot=%.2f | retcode=%u | %s",MaxOrders,basketBefore,lot,trade.ResultRetcode(),trade.ResultRetcodeDescription());
 }
 void ManageRecoveryStage2(){
-   if(!EnableRecovery||RecoveryStage!=1||MaxRecoveryStages<2||Recovery1Lots<=0||Recovery1EntryPrice<=0||Recovery1Profit>=0)return; if(RecoveryOnlyWhenMinus&&BasketProfitValue>=0)return;
-   double point=SymbolInfoDouble(SymbolTrade,SYMBOL_POINT);if(point<=0)return;double bid=SymbolInfoDouble(SymbolTrade,SYMBOL_BID),ask=SymbolInfoDouble(SymbolTrade,SYMBOL_ASK),adversePoints=0; if(Recovery1Type==POSITION_TYPE_BUY)adversePoints=(Recovery1EntryPrice-bid)/point;else if(Recovery1Type==POSITION_TYPE_SELL)adversePoints=(ask-Recovery1EntryPrice)/point;else return; if(adversePoints<Recovery2GapPoints)return;
-   double baseLots=BuyLots+SellLots;if(baseLots<=0)return;double lot=NormalizeVolume(baseLots*Recovery2Multiplier);if(Recovery2MaxLot>0)lot=NormalizeVolume(MathMin(lot,Recovery2MaxLot));if(lot<=0)return;trade.SetExpertMagicNumber(OrdersID);trade.SetTypeFillingBySymbol(SymbolTrade);bool ok=false;string c;
-   if(Recovery1Type==POSITION_TYPE_BUY){c=CommentsOrders+" RECOVERY 2 SELL";ok=trade.Sell(lot,SymbolTrade,0,0,0,c);}else{c=CommentsOrders+" RECOVERY 2 BUY";ok=trade.Buy(lot,SymbolTrade,0,0,0,c);}if(!ok||!TradeOK())PrintFormat("V19 R2 FAILED retcode=%u | %s",trade.ResultRetcode(),trade.ResultRetcodeDescription());
+   if(!EnableRecovery||RecoveryStage!=1||MaxRecoveryStages<2) return; if(Recovery1Lots<=0||Recovery1EntryPrice<=0) return; if(Recovery1Profit>=0.0) return; if(RecoveryOnlyWhenMinus&&BasketProfitValue>=0.0) return;
+   double point=SymbolInfoDouble(SymbolTrade,SYMBOL_POINT); if(point<=0) return; double bid=SymbolInfoDouble(SymbolTrade,SYMBOL_BID),ask=SymbolInfoDouble(SymbolTrade,SYMBOL_ASK),adversePoints=0;
+   if(Recovery1Type==POSITION_TYPE_BUY) adversePoints=(Recovery1EntryPrice-bid)/point; else if(Recovery1Type==POSITION_TYPE_SELL) adversePoints=(ask-Recovery1EntryPrice)/point; else return;
+   if(adversePoints<Recovery2GapPoints) return; double baseLots=BuyLots+SellLots; if(baseLots<=0) return;
+   double lot=NormalizeVolume(baseLots*Recovery2Multiplier); if(Recovery2MaxLot>0.0) lot=NormalizeVolume(MathMin(lot,Recovery2MaxLot)); if(lot<=0) return;
+   trade.SetExpertMagicNumber(OrdersID); trade.SetTypeFillingBySymbol(SymbolTrade); bool ok=false; string c;
+   if(Recovery1Type==POSITION_TYPE_BUY){ c=CommentsOrders+" RECOVERY 2 SELL"; ok=trade.Sell(lot,SymbolTrade,0,0,0,c); }
+   else{ c=CommentsOrders+" RECOVERY 2 BUY"; ok=trade.Buy(lot,SymbolTrade,0,0,0,c); }
+   if(ok&&TradeOK()) PrintFormat("V19 R2 OPEN | MaxOrders=%d | basket=%.2f | R1PL=%.2f | R2Lot=%.2f | adverse=%.0f",MaxOrders,BasketProfitValue,Recovery1Profit,lot,adversePoints);
+   else PrintFormat("V19 R2 FAILED | MaxOrders=%d | basket=%.2f | lot=%.2f | retcode=%u | %s",MaxOrders,BasketProfitValue,lot,trade.ResultRetcode(),trade.ResultRetcodeDescription());
 }
 void ManagePrimaryGrid(){
-   UpdateStatus();if(BuyOrders>0&&SellOrders>0)return;double point=SymbolInfoDouble(SymbolTrade,SYMBOL_POINT);if(point<=0)return;
-   if(BuyOrders>0&&BuyOrders<MaxOrders){double ask=SymbolInfoDouble(SymbolTrade,SYMBOL_ASK),profitGap=PointsForProfitGap*point,lossGap=PointsForFirstGap*MathPow(GapMultiplier,BuyOrders-1)*point;if(EnableProfitDirection&&BuyProfit>0){if(ask>=LastBuyPrice+profitGap){ExecutePrimary(ORDER_TYPE_BUY);}return;}if(BuyProfit<=0&&ask<=LastBuyPrice-lossGap)ExecutePrimary(ORDER_TYPE_BUY);return;}
-   if(SellOrders>0&&SellOrders<MaxOrders){double bid=SymbolInfoDouble(SymbolTrade,SYMBOL_BID),profitGap=PointsForProfitGap*point,lossGap=PointsForFirstGap*MathPow(GapMultiplier,SellOrders-1)*point;if(EnableProfitDirection&&SellProfit>0){if(bid<=LastSellPrice-profitGap)ExecutePrimary(ORDER_TYPE_SELL);return;}if(SellProfit<=0&&bid>=LastSellPrice+lossGap)ExecutePrimary(ORDER_TYPE_SELL);return;}
-   if(BuyOrders==0&&SellOrders==0){double r=GetRSI(),ma=GetMA(0),price=SymbolInfoDouble(SymbolTrade,SYMBOL_BID);if(TypeOrdersPlace!=Open__Only_Sell&&ma>0&&price>ma&&r<RSILower){ExecutePrimary(ORDER_TYPE_BUY);return;}if(TypeOrdersPlace!=Open__Only_Buy&&ma>0&&price<ma&&r>RSIUpper)ExecutePrimary(ORDER_TYPE_SELL);}
+   UpdateStatus(); if(BuyOrders>0&&SellOrders>0) return; double point=SymbolInfoDouble(SymbolTrade,SYMBOL_POINT); if(point<=0) return;
+   if(BuyOrders>0&&BuyOrders<MaxOrders){
+      double ask=SymbolInfoDouble(SymbolTrade,SYMBOL_ASK),profitGap=PointsForProfitGap*point,lossGap=PointsForFirstGap*MathPow(GapMultiplier,BuyOrders-1)*point;
+      if(EnableProfitDirection&&BuyProfit>0.0){ if(ask>=LastBuyPrice+profitGap){ExecutePrimary(ORDER_TYPE_BUY);return;} return; }
+      if(BuyProfit<=0.0&&ask<=LastBuyPrice-lossGap){ExecutePrimary(ORDER_TYPE_BUY);return;} return;
+   }
+   if(SellOrders>0&&SellOrders<MaxOrders){
+      double bid=SymbolInfoDouble(SymbolTrade,SYMBOL_BID),profitGap=PointsForProfitGap*point,lossGap=PointsForFirstGap*MathPow(GapMultiplier,SellOrders-1)*point;
+      if(EnableProfitDirection&&SellProfit>0.0){ if(bid<=LastSellPrice-profitGap){ExecutePrimary(ORDER_TYPE_SELL);return;} return; }
+      if(SellProfit<=0.0&&bid>=LastSellPrice+lossGap){ExecutePrimary(ORDER_TYPE_SELL);return;} return;
+   }
+   if(BuyOrders==0&&SellOrders==0){
+      double r=GetRSI(),ma=GetMA(0),price=SymbolInfoDouble(SymbolTrade,SYMBOL_BID);
+      if(TypeOrdersPlace!=Open__Only_Sell&&ma>0&&price>ma&&r<RSILower){ExecutePrimary(ORDER_TYPE_BUY);return;}
+      if(TypeOrdersPlace!=Open__Only_Buy&&ma>0&&price<ma&&r>RSIUpper){ExecutePrimary(ORDER_TYPE_SELL);return;}
+   }
 }
-bool ExecutePrimary(ENUM_ORDER_TYPE type){int count=(type==ORDER_TYPE_BUY)?BuyOrders:SellOrders;if(count>=MaxOrders)return false;double lot=NormalizeVolume(ManualLotSize*(count+1));string c=(type==ORDER_TYPE_BUY)?StringFormat("%s PRIMARY BUY %d",CommentsOrders,count+1):StringFormat("%s PRIMARY SELL %d",CommentsOrders,count+1);trade.SetExpertMagicNumber(OrdersID);trade.SetTypeFillingBySymbol(SymbolTrade);bool ok=(type==ORDER_TYPE_BUY)?trade.Buy(lot,SymbolTrade,0,0,0,c):trade.Sell(lot,SymbolTrade,0,0,0,c);return ok&&TradeOK();}
-void ManageBasketExit(){UpdateStatus();int total=BuyOrders+SellOrders+((RecoveryStage>0)?1:0)+((RecoveryStage>1)?1:0);if(total==0){BasketPeakProfit=0;BasketTrailingActive=false;return;}double p=BasketProfitValue;if(UseTrailingProfit){double arm=MathMax(TargetProfitUSD,TrailingStartUSD);if(!BasketTrailingActive&&p>=arm){BasketTrailingActive=true;BasketPeakProfit=p;}if(BasketTrailingActive){if(p>BasketPeakProfit)BasketPeakProfit=p;if(p<=BasketPeakProfit-TrailingStopUSD){DeleteRecoveryPending();CloseBasket();}}}else if(p>=TargetProfitUSD){DeleteRecoveryPending();CloseBasket();}}
-void CloseAllExposure(){for(int i=OrdersTotal()-1;i>=0;i--){ulong ticket=OrderGetTicket(i);if(IsOurOrder(ticket))trade.OrderDelete(ticket);}for(int i=PositionsTotal()-1;i>=0;i--){ulong ticket=PositionGetTicket(i);if(IsOurPosition(ticket))trade.PositionClose(ticket);}BasketPeakProfit=0;BasketTrailingActive=false;}
-void CloseBasket(){for(int i=PositionsTotal()-1;i>=0;i--){ulong ticket=PositionGetTicket(i);if(IsOurPosition(ticket))trade.PositionClose(ticket);}BasketPeakProfit=0;BasketTrailingActive=false;}
+bool ExecutePrimary(ENUM_ORDER_TYPE type){
+   int count=(type==ORDER_TYPE_BUY)?BuyOrders:SellOrders; if(count>=MaxOrders) return false; double lot=NormalizeVolume(ManualLotSize*(count+1));
+   string c=(type==ORDER_TYPE_BUY)?StringFormat("%s PRIMARY BUY %d",CommentsOrders,count+1):StringFormat("%s PRIMARY SELL %d",CommentsOrders,count+1);
+   trade.SetExpertMagicNumber(OrdersID); trade.SetTypeFillingBySymbol(SymbolTrade); bool ok=(type==ORDER_TYPE_BUY)?trade.Buy(lot,SymbolTrade,0,0,0,c):trade.Sell(lot,SymbolTrade,0,0,0,c);
+   if(ok&&TradeOK()) return true; PrintFormat("V19 PRIMARY FAILED retcode=%u | %s",trade.ResultRetcode(),trade.ResultRetcodeDescription()); return false;
+}
+void ManageBasketExit(){
+   UpdateStatus(); int total=BuyOrders+SellOrders+((RecoveryStage>0)?1:0)+((RecoveryStage>1)?1:0); if(total==0){BasketPeakProfit=0;BasketTrailingActive=false;return;}
+   double p=BasketProfitValue;
+   if(UseTrailingProfit){
+      double arm=MathMax(TargetProfitUSD,TrailingStartUSD);
+      if(!BasketTrailingActive&&p>=arm){BasketTrailingActive=true;BasketPeakProfit=p;PrintFormat("V19 BASKET TARGET REACHED -> TRAILING ON | basket=%.2f | stage=%d",p,RecoveryStage);}
+      if(BasketTrailingActive){ if(p>BasketPeakProfit) BasketPeakProfit=p; if(p<=BasketPeakProfit-TrailingStopUSD){PrintFormat("V19 BASKET TRAILING CLOSE | peak=%.2f | current=%.2f | stage=%d",BasketPeakProfit,p,RecoveryStage);DeleteRecoveryPending();CloseBasket();} }
+   }
+   else if(p>=TargetProfitUSD){DeleteRecoveryPending();CloseBasket();}
+}
+void CloseAllExposure(){
+   for(int i=OrdersTotal()-1;i>=0;i--){ ulong ticket=OrderGetTicket(i); if(!IsOurOrder(ticket)) continue; trade.OrderDelete(ticket); }
+   for(int i=PositionsTotal()-1;i>=0;i--){ ulong ticket=PositionGetTicket(i); if(!IsOurPosition(ticket)) continue; trade.PositionClose(ticket); }
+   BasketPeakProfit=0;BasketTrailingActive=false;
+}
+void CloseBasket(){
+   for(int i=PositionsTotal()-1;i>=0;i--){ ulong ticket=PositionGetTicket(i); if(!IsOurPosition(ticket)) continue; trade.PositionClose(ticket); }
+   BasketPeakProfit=0;BasketTrailingActive=false;
+}
 
-//================ DASHBOARD =================//
-void CreateDashboardLabel(string name,string text,int x,int y,int fontSize,color textColor,ENUM_ANCHOR_POINT anchor=ANCHOR_LEFT_UPPER){
-   if(ObjectFind(0,name)<0){if(!ObjectCreate(0,name,OBJ_LABEL,0,0,0))return;ObjectSetInteger(0,name,OBJPROP_CORNER,CORNER_LEFT_UPPER);ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);ObjectSetInteger(0,name,OBJPROP_SELECTED,false);ObjectSetInteger(0,name,OBJPROP_HIDDEN,true);ObjectSetInteger(0,name,OBJPROP_BACK,false);ObjectSetInteger(0,name,OBJPROP_ZORDER,20);}ObjectSetInteger(0,name,OBJPROP_ANCHOR,anchor);ObjectSetInteger(0,name,OBJPROP_XDISTANCE,x);ObjectSetInteger(0,name,OBJPROP_YDISTANCE,y);ObjectSetInteger(0,name,OBJPROP_FONTSIZE,12);ObjectSetInteger(0,name,OBJPROP_COLOR,textColor);ObjectSetString(0,name,OBJPROP_FONT,"Calibri");ObjectSetString(0,name,OBJPROP_TEXT,text);
+//+------------------------------------------------------------------+
+//| FUNCTION: CreateDashboardLabel                                   |
+//+------------------------------------------------------------------+
+void CreateDashboardLabel(string name,
+                          string text,
+                          int x,
+                          int y,
+                          int fontSize,
+                          color textColor,
+                          ENUM_ANCHOR_POINT anchor=ANCHOR_LEFT_UPPER)
+{
+   if(ObjectFind(0,name)<0)
+   {
+      if(!ObjectCreate(0,name,OBJ_LABEL,0,0,0))
+         return;
+      ObjectSetInteger(0,name,OBJPROP_CORNER,CORNER_LEFT_UPPER);
+      ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
+      ObjectSetInteger(0,name,OBJPROP_SELECTED,false);
+      ObjectSetInteger(0,name,OBJPROP_HIDDEN,true);
+      ObjectSetInteger(0,name,OBJPROP_ZORDER,20);
+   }
+   ObjectSetInteger(0,name,OBJPROP_ANCHOR,anchor);
+   ObjectSetInteger(0,name,OBJPROP_XDISTANCE,x);
+   ObjectSetInteger(0,name,OBJPROP_YDISTANCE,y);
+   ObjectSetInteger(0,name,OBJPROP_FONTSIZE,12);
+   ObjectSetInteger(0,name,OBJPROP_COLOR,textColor);
+   ObjectSetString(0,name,OBJPROP_FONT,"Calibri");
+   ObjectSetString(0,name,OBJPROP_TEXT,text);
 }
-void CreateDashboardLine(string name,int x,int y,int width,int height=2){
-   if(ObjectFind(0,name)<0){if(!ObjectCreate(0,name,OBJ_RECTANGLE_LABEL,0,0,0))return;ObjectSetInteger(0,name,OBJPROP_CORNER,CORNER_LEFT_UPPER);ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);ObjectSetInteger(0,name,OBJPROP_SELECTED,false);ObjectSetInteger(0,name,OBJPROP_HIDDEN,true);ObjectSetInteger(0,name,OBJPROP_BACK,false);ObjectSetInteger(0,name,OBJPROP_ZORDER,15);}ObjectSetInteger(0,name,OBJPROP_XDISTANCE,x);ObjectSetInteger(0,name,OBJPROP_YDISTANCE,y);ObjectSetInteger(0,name,OBJPROP_XSIZE,width);ObjectSetInteger(0,name,OBJPROP_YSIZE,height);ObjectSetInteger(0,name,OBJPROP_BGCOLOR,clrOrange);ObjectSetInteger(0,name,OBJPROP_COLOR,clrOrange);ObjectSetInteger(0,name,OBJPROP_BORDER_TYPE,BORDER_FLAT);
+
+//+------------------------------------------------------------------+
+//| FUNCTION: CreateDashboardDivider                                 |
+//+------------------------------------------------------------------+
+void CreateDashboardDivider(string name,int x,int y,int width,color lineColor)
+{
+   if(ObjectFind(0,name)<0)
+   {
+      if(!ObjectCreate(0,name,OBJ_RECTANGLE_LABEL,0,0,0)) return;
+      ObjectSetInteger(0,name,OBJPROP_CORNER,CORNER_LEFT_UPPER);
+      ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
+      ObjectSetInteger(0,name,OBJPROP_SELECTED,false);
+      ObjectSetInteger(0,name,OBJPROP_HIDDEN,true);
+      ObjectSetInteger(0,name,OBJPROP_BACK,false);
+      ObjectSetInteger(0,name,OBJPROP_ZORDER,5);
+   }
+   ObjectSetInteger(0,name,OBJPROP_XDISTANCE,x);
+   ObjectSetInteger(0,name,OBJPROP_YDISTANCE,y);
+   ObjectSetInteger(0,name,OBJPROP_XSIZE,width);
+   ObjectSetInteger(0,name,OBJPROP_YSIZE,2);
+   ObjectSetInteger(0,name,OBJPROP_BGCOLOR,lineColor);
+   ObjectSetInteger(0,name,OBJPROP_COLOR,lineColor);
 }
-void CreateDashboardStatePill(string name,string text,int x,int y,int width,int height,color bgColor,color textColor){
-   if(ObjectFind(0,name)<0){if(!ObjectCreate(0,name,OBJ_RECTANGLE_LABEL,0,0,0))return;ObjectSetInteger(0,name,OBJPROP_CORNER,CORNER_LEFT_UPPER);ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);ObjectSetInteger(0,name,OBJPROP_SELECTED,false);ObjectSetInteger(0,name,OBJPROP_HIDDEN,true);ObjectSetInteger(0,name,OBJPROP_BACK,false);ObjectSetInteger(0,name,OBJPROP_ZORDER,16);}ObjectSetInteger(0,name,OBJPROP_XDISTANCE,x);ObjectSetInteger(0,name,OBJPROP_YDISTANCE,y);ObjectSetInteger(0,name,OBJPROP_XSIZE,width);ObjectSetInteger(0,name,OBJPROP_YSIZE,height);ObjectSetInteger(0,name,OBJPROP_BGCOLOR,ColorToARGB(bgColor,210));ObjectSetInteger(0,name,OBJPROP_COLOR,bgColor);ObjectSetInteger(0,name,OBJPROP_BORDER_TYPE,BORDER_FLAT);ObjectSetInteger(0,name,OBJPROP_WIDTH,1);CreateDashboardLabel(name+"_TEXT",text,x+width/2,y+4,12,textColor,ANCHOR_UPPER);
+
+//+------------------------------------------------------------------+
+//| FUNCTION: CreateDashboardStatePill                               |
+//+------------------------------------------------------------------+
+void CreateDashboardStatePill(string name,
+                              string text,
+                              int x,
+                              int y,
+                              int width,
+                              int height,
+                              color bgColor,
+                              color textColor)
+{
+   string bg=name+"_BG";
+   if(ObjectFind(0,bg)<0)
+   {
+      if(!ObjectCreate(0,bg,OBJ_RECTANGLE_LABEL,0,0,0)) return;
+      ObjectSetInteger(0,bg,OBJPROP_CORNER,CORNER_LEFT_UPPER);
+      ObjectSetInteger(0,bg,OBJPROP_SELECTABLE,false);
+      ObjectSetInteger(0,bg,OBJPROP_SELECTED,false);
+      ObjectSetInteger(0,bg,OBJPROP_HIDDEN,true);
+      ObjectSetInteger(0,bg,OBJPROP_BACK,false);
+      ObjectSetInteger(0,bg,OBJPROP_ZORDER,6);
+   }
+   ObjectSetInteger(0,bg,OBJPROP_XDISTANCE,x);
+   ObjectSetInteger(0,bg,OBJPROP_YDISTANCE,y);
+   ObjectSetInteger(0,bg,OBJPROP_XSIZE,width);
+   ObjectSetInteger(0,bg,OBJPROP_YSIZE,height);
+   ObjectSetInteger(0,bg,OBJPROP_BGCOLOR,ColorToARGB(bgColor,190));
+   ObjectSetInteger(0,bg,OBJPROP_COLOR,bgColor);
+   ObjectSetInteger(0,bg,OBJPROP_BORDER_TYPE,BORDER_FLAT);
+   ObjectSetInteger(0,bg,OBJPROP_WIDTH,1);
+   CreateDashboardLabel(name,text,x+(width/2),y+(height/2),12,textColor,ANCHOR_CENTER);
 }
-void CreateDashboardPanel(){
-   string name=DASH_PREFIX+"BG";if(ObjectFind(0,name)<0){if(!ObjectCreate(0,name,OBJ_RECTANGLE_LABEL,0,0,0))return;ObjectSetInteger(0,name,OBJPROP_CORNER,CORNER_LEFT_UPPER);ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);ObjectSetInteger(0,name,OBJPROP_SELECTED,false);ObjectSetInteger(0,name,OBJPROP_HIDDEN,true);ObjectSetInteger(0,name,OBJPROP_BACK,false);ObjectSetInteger(0,name,OBJPROP_ZORDER,0);}ObjectSetInteger(0,name,OBJPROP_XDISTANCE,18);ObjectSetInteger(0,name,OBJPROP_YDISTANCE,50);ObjectSetInteger(0,name,OBJPROP_XSIZE,850);ObjectSetInteger(0,name,OBJPROP_YSIZE,930);ObjectSetInteger(0,name,OBJPROP_BGCOLOR,ColorToARGB(C'255,140,0',128));ObjectSetInteger(0,name,OBJPROP_COLOR,clrOrange);ObjectSetInteger(0,name,OBJPROP_BORDER_TYPE,BORDER_FLAT);ObjectSetInteger(0,name,OBJPROP_WIDTH,2);
+
+//+------------------------------------------------------------------+
+//| FUNCTION: CreateDashboardPanel                                   |
+//+------------------------------------------------------------------+
+void CreateDashboardPanel()
+{
+   string name=DASH_PREFIX+"BG";
+   if(ObjectFind(0,name)<0)
+   {
+      if(!ObjectCreate(0,name,OBJ_RECTANGLE_LABEL,0,0,0)) return;
+      ObjectSetInteger(0,name,OBJPROP_CORNER,CORNER_LEFT_UPPER);
+      ObjectSetInteger(0,name,OBJPROP_SELECTABLE,false);
+      ObjectSetInteger(0,name,OBJPROP_SELECTED,false);
+      ObjectSetInteger(0,name,OBJPROP_HIDDEN,true);
+      ObjectSetInteger(0,name,OBJPROP_BACK,false);
+      ObjectSetInteger(0,name,OBJPROP_ZORDER,0);
+   }
+   ObjectSetInteger(0,name,OBJPROP_XDISTANCE,18);
+   ObjectSetInteger(0,name,OBJPROP_YDISTANCE,50);
+   ObjectSetInteger(0,name,OBJPROP_XSIZE,850);
+   ObjectSetInteger(0,name,OBJPROP_YSIZE,930);
+   ObjectSetInteger(0,name,OBJPROP_BGCOLOR,ColorToARGB(C'255,140,0',128));
+   ObjectSetInteger(0,name,OBJPROP_COLOR,clrOrange);
+   ObjectSetInteger(0,name,OBJPROP_BORDER_TYPE,BORDER_FLAT);
+   ObjectSetInteger(0,name,OBJPROP_WIDTH,2);
 }
-void DeleteDashboard(){for(int i=ObjectsTotal(0,-1,-1)-1;i>=0;i--){string name=ObjectName(0,i,-1,-1);if(StringFind(name,DASH_PREFIX)==0)ObjectDelete(0,name);}}
-void DisplayDashboard(double dd){
-   CreateDashboardPanel();string state="EA RUNNING / WAITING";color stateColor=clrBlack,stateBg=clrLime;if(DailyTargetReached){state="DAILY TARGET REACHED - LOCKED";stateColor=clrWhite;stateBg=clrRed;}else if(NewsCloseWindow){state="NEWS CLOSE WINDOW";stateColor=clrWhite;stateBg=clrRed;}else if(NewsBlockActive){state="NEWS FILTER ACTIVE - BLOCKED";stateColor=clrBlack;stateBg=clrYellow;}else if(RecoveryStage==2){state="RECOVERY 2 ACTIVE";stateColor=clrWhite;stateBg=clrRed;}else if(RecoveryStage==1){state="RECOVERY 1 ACTIVE";stateColor=clrBlack;stateBg=clrYellow;}else if(BuyOrders>0){state=BuyProfit>0?"PRIMARY BUY / PROFIT MODE":"PRIMARY BUY / LOSS MODE";stateColor=BuyProfit>0?clrBlack:clrWhite;stateBg=BuyProfit>0?clrLime:clrRed;}else if(SellOrders>0){state=SellProfit>0?"PRIMARY SELL / PROFIT MODE":"PRIMARY SELL / LOSS MODE";stateColor=SellProfit>0?clrBlack:clrWhite;stateBg=SellProfit>0?clrLime:clrRed;}
-   double dailyProfit=GetDailyProfit();double dailyTarget=MathMax(0.0,DailyTargetProfitUSD);int left=52,valueX=365,row=34,y=78;
-   CreateDashboardLabel(DASH_PREFIX+"TITLE","GRID 06 V19",52,67,30,clrWhite);
-   CreateDashboardLabel(DASH_PREFIX+"SUBTITLE","PROFIT DIRECTION + DYNAMIC RECOVERY + NEWS",53,105,14,clrOrange);
-   CreateDashboardLabel(DASH_PREFIX+"SYMBOL",SymbolTrade+"  |  "+EnumToString((ENUM_TIMEFRAMES)_Period),805,70,11,clrWhite,ANCHOR_RIGHT_UPPER);
-   CreateDashboardLabel(DASH_PREFIX+"RUNNING","EA RUNNING",805,94,11,clrLime,ANCHOR_RIGHT_UPPER);CreateDashboardLine(DASH_PREFIX+"LINE0",47,125,775,3);
-   CreateDashboardLabel(DASH_PREFIX+"TIME_L","Strategy Time (WIB)",left,y,12,clrWhite);CreateDashboardLabel(DASH_PREFIX+"TIME_C",":",valueX-18,y,12,clrOrange);CreateDashboardLabel(DASH_PREFIX+"TIME_V",TimeToString(GetStrategyTime(),TIME_DATE|TIME_SECONDS),valueX,y,12,clrWhite);y+=row;
-   CreateDashboardLabel(DASH_PREFIX+"HOURS_L","Trading Hours (WIB)",left,y,12,clrWhite);CreateDashboardLabel(DASH_PREFIX+"HOURS_C",":",valueX-18,y,12,clrOrange);CreateDashboardLabel(DASH_PREFIX+"HOURS_V",IntegerToString(StartHour)+" - "+IntegerToString(EndHour),valueX,y,12,clrWhite);y+=row+2;CreateDashboardLine(DASH_PREFIX+"LINE1",47,y,775,2);y+=14;
-   CreateDashboardLabel(DASH_PREFIX+"STATE_L","STATE",left,y+5,13,clrWhite);CreateDashboardLabel(DASH_PREFIX+"STATE_C",":",valueX-18,y+5,13,clrOrange);CreateDashboardStatePill(DASH_PREFIX+"STATE_PILL",state,350,y-1,450,28,stateBg,stateColor);y+=row+8;CreateDashboardLine(DASH_PREFIX+"LINE2",47,y,775,2);y+=15;
-   color basketColor=BasketProfitValue>=0?clrLime:clrRed,dailyColor=dailyProfit>=0?clrLime:clrRed;
-   CreateDashboardLabel(DASH_PREFIX+"BASKET_L","BASKET P/L",left,y,14,clrOrange);CreateDashboardLabel(DASH_PREFIX+"BASKET_C",":",valueX-18,y,14,clrOrange);CreateDashboardLabel(DASH_PREFIX+"BASKET_V",DoubleToString(BasketProfitValue,2)+" USD",valueX,y,15,basketColor);y+=row;
-   CreateDashboardLabel(DASH_PREFIX+"DAILY_L","DAILY P/L",left,y,14,clrOrange);CreateDashboardLabel(DASH_PREFIX+"DAILY_C",":",valueX-18,y,14,clrOrange);CreateDashboardLabel(DASH_PREFIX+"DAILY_V",DoubleToString(dailyProfit,2)+" / "+DoubleToString(dailyTarget,2)+" USD  ["+(EnableDailyTarget?"ON":"OFF")+"]",valueX,y,14,dailyColor);y+=row+2;CreateDashboardLine(DASH_PREFIX+"LINE3",47,y,775,2);y+=15;
-   color buyColor=BuyProfit>=0?clrLime:clrRed,sellColor=SellProfit>=0?clrLime:clrRed;
-   CreateDashboardLabel(DASH_PREFIX+"BUY_L","BUY",left,y,13,clrOrange);CreateDashboardLabel(DASH_PREFIX+"BUY_C",":",valueX-18,y,13,clrOrange);CreateDashboardLabel(DASH_PREFIX+"BUY_V",IntegerToString(BuyOrders)+"  |  LOT = "+DoubleToString(BuyLots,2)+"  |  P/L = "+DoubleToString(BuyProfit,2),valueX,y,12,buyColor);y+=row;
-   CreateDashboardLabel(DASH_PREFIX+"SELL_L","SELL",left,y,13,clrOrange);CreateDashboardLabel(DASH_PREFIX+"SELL_C",":",valueX-18,y,13,clrOrange);CreateDashboardLabel(DASH_PREFIX+"SELL_V",IntegerToString(SellOrders)+"  |  LOT = "+DoubleToString(SellLots,2)+"  |  P/L = "+DoubleToString(SellProfit,2),valueX,y,12,sellColor);y+=row+2;CreateDashboardLine(DASH_PREFIX+"LINE4",47,y,775,2);y+=15;
-   CreateDashboardLabel(DASH_PREFIX+"LOSS_L","LOSS GAP",left,y,13,clrOrange);CreateDashboardLabel(DASH_PREFIX+"LOSS_C",":",valueX-18,y,13,clrOrange);CreateDashboardLabel(DASH_PREFIX+"LOSS_V",DoubleToString(PointsForFirstGap,0)+"  |  MULT = "+DoubleToString(GapMultiplier,2),valueX,y,12,clrWhite);y+=row;
-   CreateDashboardLabel(DASH_PREFIX+"PROFIT_L","PROFIT GAP",left,y,13,clrOrange);CreateDashboardLabel(DASH_PREFIX+"PROFIT_C",":",valueX-18,y,13,clrOrange);CreateDashboardLabel(DASH_PREFIX+"PROFIT_V",DoubleToString(PointsForProfitGap,0)+"  |  MODE = "+(EnableProfitDirection?"ON":"OFF"),valueX,y,12,EnableProfitDirection?clrLime:clrRed);y+=row+2;CreateDashboardLine(DASH_PREFIX+"LINE5",47,y,775,2);y+=15;
-   color r1Color=RecoveryStage>=1?clrYellow:clrSilver,r2Color=RecoveryStage>=2?clrRed:clrSilver;
-   CreateDashboardLabel(DASH_PREFIX+"R1_L","RECOVERY 1",left,y,13,clrOrange);CreateDashboardLabel(DASH_PREFIX+"R1_C",":",valueX-18,y,13,clrOrange);CreateDashboardLabel(DASH_PREFIX+"R1_V",(RecoveryStage>=1?"ACTIVE":"OFF")+"  |  LOT = "+DoubleToString(Recovery1Lots,2)+"  |  P/L = "+DoubleToString(Recovery1Profit,2),valueX,y,12,r1Color);y+=row;
-   CreateDashboardLabel(DASH_PREFIX+"R2_L","RECOVERY 2",left,y,13,clrOrange);CreateDashboardLabel(DASH_PREFIX+"R2_C",":",valueX-18,y,13,clrOrange);CreateDashboardLabel(DASH_PREFIX+"R2_V",(RecoveryStage>=2?"ACTIVE":"OFF")+"  |  LOT = "+DoubleToString(Recovery2Lots,2)+"  |  P/L = "+DoubleToString(Recovery2Profit,2),valueX,y,12,r2Color);y+=row;
-   CreateDashboardLabel(DASH_PREFIX+"RCFG_L","RECOVERY CONFIG",left,y,11,clrWhite);CreateDashboardLabel(DASH_PREFIX+"RCFG_C",":",valueX-18,y,11,clrOrange);CreateDashboardLabel(DASH_PREFIX+"RCFG_V","AFTER PRIMARY #"+IntegerToString(MaxOrders)+"  |  ANCHOR = LAST PRIMARY",valueX,y,11,clrWhite);y+=row+2;CreateDashboardLine(DASH_PREFIX+"LINE6",47,y,775,2);y+=15;
-   CreateDashboardLabel(DASH_PREFIX+"TARGET_L","TARGET PROFIT",left,y,13,clrOrange);CreateDashboardLabel(DASH_PREFIX+"TARGET_C",":",valueX-18,y,13,clrOrange);CreateDashboardLabel(DASH_PREFIX+"TARGET_V",DoubleToString(TargetProfitUSD,2)+" USD",valueX,y,12,clrWhite);y+=row;
-   CreateDashboardLabel(DASH_PREFIX+"TRAIL_L","TRAILING",left,y,13,clrOrange);CreateDashboardLabel(DASH_PREFIX+"TRAIL_C",":",valueX-18,y,13,clrOrange);CreateDashboardLabel(DASH_PREFIX+"TRAIL_V",(UseTrailingProfit?"ON":"OFF")+"  |  START = "+DoubleToString(TrailingStartUSD,2)+"  |  STOP = "+DoubleToString(TrailingStopUSD,2),valueX,y,12,UseTrailingProfit?clrLime:clrRed);y+=row;
-   CreateDashboardLabel(DASH_PREFIX+"PEAK_L","PEAK PROFIT",left,y,13,clrOrange);CreateDashboardLabel(DASH_PREFIX+"PEAK_C",":",valueX-18,y,13,clrOrange);CreateDashboardLabel(DASH_PREFIX+"PEAK_V",DoubleToString(BasketPeakProfit,2)+" USD",valueX,y,12,clrWhite);y+=row+2;CreateDashboardLine(DASH_PREFIX+"LINE7",47,y,775,2);y+=15;
-   color ddColor=clrLime;if(dd>=50)ddColor=clrRed;else if(dd>=20)ddColor=clrYellow;CreateDashboardLabel(DASH_PREFIX+"DD_L","EQUITY DD",left,y,14,clrOrange);CreateDashboardLabel(DASH_PREFIX+"DD_C",":",valueX-18,y,14,clrOrange);CreateDashboardLabel(DASH_PREFIX+"DD_V",DoubleToString(dd,2)+" %",valueX,y,15,ddColor);y+=row+2;CreateDashboardLine(DASH_PREFIX+"LINE8",47,y,775,2);y+=15;
-   color newsColor=clrLime;if(NewsCloseWindow)newsColor=clrRed;else if(NewsBlockActive)newsColor=clrYellow;CreateDashboardLabel(DASH_PREFIX+"NEWS_L","NEWS FILTER",left,y,13,clrOrange);CreateDashboardLabel(DASH_PREFIX+"NEWS_C",":",valueX-18,y,13,clrOrange);CreateDashboardLabel(DASH_PREFIX+"NEWS_V",(EnableNewsFilter?"ON":"OFF")+"  |  "+NewsCurrency+"  |  HIGH="+(NewsHighImpactOnly?"ON":"OFF"),valueX,y,12,EnableNewsFilter?clrLime:clrSilver);y+=row;
-   CreateDashboardLabel(DASH_PREFIX+"NSTATUS_L","NEWS STATUS",left,y,13,clrOrange);CreateDashboardLabel(DASH_PREFIX+"NSTATUS_C",":",valueX-18,y,13,clrOrange);CreateDashboardLabel(DASH_PREFIX+"NSTATUS_V",NewsStatusText(),valueX,y,12,newsColor);y+=row;
-   CreateDashboardLabel(DASH_PREFIX+"NEXT_L","NEXT NEWS",left,y,13,clrOrange);CreateDashboardLabel(DASH_PREFIX+"NEXT_C",":",valueX-18,y,13,clrOrange);CreateDashboardLabel(DASH_PREFIX+"NEXT_V",NewsNextText(),valueX,y,10,clrWhite);
-   CreateDashboardLine(DASH_PREFIX+"LINE9",47,889,775,2);CreateDashboardLabel(DASH_PREFIX+"TZ","Server UTC Offset  :  "+DoubleToString(ServerUTCOffsetHours,1)+"     |     Strategy UTC Offset  :  "+DoubleToString(StrategyUTCOffsetHours,1)+" (WIB)",52,900,10,clrWhite);
+
+//+------------------------------------------------------------------+
+//| FUNCTION: DeleteDashboard                                        |
+//+------------------------------------------------------------------+
+void DeleteDashboard()
+{
+   for(int i=ObjectsTotal(0,-1,-1)-1;i>=0;i--)
+   {
+      string name=ObjectName(0,i,-1,-1);
+      if(StringFind(name,DASH_PREFIX)==0) ObjectDelete(0,name);
+   }
+}
+
+//+------------------------------------------------------------------+
+//| FUNCTION: DisplayDashboard                                       |
+//+------------------------------------------------------------------+
+void DisplayDashboard(double dd)
+{
+   CreateDashboardPanel();
+   string state="IDLE";
+   color stateColor=clrSilver;
+
+   if(DailyTargetReached){ state="DAILY TARGET REACHED - LOCKED"; stateColor=clrRed; }
+   else if(IsTerminated){ state="RISK STOP - EA TERMINATED"; stateColor=clrRed; }
+   else if(RecoveryStage==2){ state="RECOVERY 2 ACTIVE"; stateColor=clrRed; }
+   else if(RecoveryStage==1){ state="RECOVERY 1 ACTIVE"; stateColor=clrYellow; }
+   else if(BuyOrders>0){ if(BuyProfit>0){state="PRIMARY BUY / PROFIT MODE";stateColor=clrLime;} else {state="PRIMARY BUY / LOSS MODE";stateColor=clrRed;} }
+   else if(SellOrders>0){ if(SellProfit>0){state="PRIMARY SELL / PROFIT MODE";stateColor=clrLime;} else {state="PRIMARY SELL / LOSS MODE";stateColor=clrRed;} }
+   else if(UseTradingHour&&!IsTradingHour()){ state="OUTSIDE TRADING HOURS"; stateColor=clrYellow; }
+   else if(IsNewsEngineAllowed()&&NewsCloseWindow){ state="NEWS CLOSE WINDOW"; stateColor=clrRed; }
+   else if(IsNewsEngineAllowed()&&NewsBlockActive){ state="NEWS BLOCK ACTIVE"; stateColor=clrYellow; }
+   else { state="READY / WAITING FOR ENTRY"; stateColor=clrLime; }
+
+   double dailyProfit=GetDailyProfit();
+   double balance=AccountInfoDouble(ACCOUNT_BALANCE);
+   double equity=AccountInfoDouble(ACCOUNT_EQUITY);
+   double floating=BasketProfitValue;
+   color basketColor=(floating>=0)?clrLime:clrRed;
+   color dailyColor=(dailyProfit>=0)?clrLime:clrRed;
+   color buyColor=(BuyProfit>=0)?clrLime:clrRed;
+   color sellColor=(SellProfit>=0)?clrLime:clrRed;
+   color newsColor=clrLime;
+   if(NewsCloseWindow) newsColor=clrRed; else if(NewsBlockActive) newsColor=clrYellow;
+   color ddColor=clrLime;
+   if(dd>=50.0) ddColor=clrRed; else if(dd>=20.0) ddColor=clrYellow;
+
+   int x=42;
+   int y=72;
+   int line=26;
+   int rightX=450;
+
+   CreateDashboardLabel(DASH_PREFIX+"TITLE","GRID 06 V19",x,y,12,clrWhite);
+   CreateDashboardLabel(DASH_PREFIX+"VERSION","V19.01  |  PROFIT DIRECTION + DYNAMIC RECOVERY + NEWS",x,y+line,12,clrWhite);
+   CreateDashboardLabel(DASH_PREFIX+"SYMBOL","SYMBOL : "+SymbolTrade+"   |   TF : "+EnumToString((ENUM_TIMEFRAMES)_Period),x,y+(line*2),12,clrWhite);
+   CreateDashboardLabel(DASH_PREFIX+"RUNNING","EA STATUS : RUNNING",rightX,y+(line*2),12,clrLime);
+   CreateDashboardDivider(DASH_PREFIX+"DIV_HEADER",x,y+(line*3)-8,800,clrOrange);
+
+   CreateDashboardLabel(DASH_PREFIX+"TIME","STRATEGY TIME (WIB) : "+TimeToString(GetStrategyTime(),TIME_DATE|TIME_SECONDS),x,y+(line*4),12,clrWhite);
+   CreateDashboardLabel(DASH_PREFIX+"HOURS","TRADING HOURS (WIB) : "+IntegerToString(StartHour)+" - "+IntegerToString(EndHour)+"   |   SESSION = "+(IsTradingHour()?"OPEN":"CLOSED"),x,y+(line*5),12,IsTradingHour()?clrLime:clrYellow);
+   CreateDashboardLabel(DASH_PREFIX+"STATE_TEXT","CURRENT STATE",x,y+(line*6),12,clrWhite);
+   CreateDashboardStatePill(DASH_PREFIX+"STATE",state,x+155,y+(line*6)-7,625,28,stateColor,clrWhite);
+   CreateDashboardDivider(DASH_PREFIX+"DIV_STATE",x,y+(line*7)+5,800,clrOrange);
+
+   CreateDashboardLabel(DASH_PREFIX+"BASKET","BASKET P/L : "+DoubleToString(floating,2)+" USD",x,y+(line*8),12,basketColor);
+   CreateDashboardLabel(DASH_PREFIX+"DAILY","DAILY P/L : "+DoubleToString(dailyProfit,2)+" / "+DoubleToString(DailyTargetProfitUSD,2)+" USD   | TARGET = "+(EnableDailyTarget?"ON":"OFF"),x,y+(line*9),12,dailyColor);
+   CreateDashboardLabel(DASH_PREFIX+"BALANCE","BALANCE : "+DoubleToString(balance,2)+"   | EQUITY : "+DoubleToString(equity,2),x,y+(line*10),12,clrWhite);
+   CreateDashboardDivider(DASH_PREFIX+"DIV_PROFIT",x,y+(line*11)+5,800,clrOrange);
+
+   CreateDashboardLabel(DASH_PREFIX+"BUY","BUY  : "+IntegerToString(BuyOrders)+"   | LOT = "+DoubleToString(BuyLots,2)+"   | P/L = "+DoubleToString(BuyProfit,2),x,y+(line*12),12,buyColor);
+   CreateDashboardLabel(DASH_PREFIX+"SELL","SELL : "+IntegerToString(SellOrders)+"   | LOT = "+DoubleToString(SellLots,2)+"   | P/L = "+DoubleToString(SellProfit,2),x,y+(line*13),12,sellColor);
+   CreateDashboardLabel(DASH_PREFIX+"GRID","GRID : MAX PRIMARY = "+IntegerToString(MaxOrders)+"   | LOSS GAP = "+DoubleToString(PointsForFirstGap,0)+"   | MULT = "+DoubleToString(GapMultiplier,2),x,y+(line*14),12,clrWhite);
+   CreateDashboardLabel(DASH_PREFIX+"PROFITGAP","PROFIT DIRECTION : "+(EnableProfitDirection?"ON":"OFF")+"   | GAP = "+DoubleToString(PointsForProfitGap,0),x,y+(line*15),12,clrWhite);
+   CreateDashboardDivider(DASH_PREFIX+"DIV_GRID",x,y+(line*16)+5,800,clrOrange);
+
+   color r1Color=(RecoveryStage>=1)?clrYellow:clrSilver;
+   color r2Color=(RecoveryStage>=2)?clrRed:clrSilver;
+   CreateDashboardLabel(DASH_PREFIX+"R1","RECOVERY 1 : "+(RecoveryStage>=1?"ACTIVE":"OFF")+"   | LOT = "+DoubleToString(Recovery1Lots,2)+"   | P/L = "+DoubleToString(Recovery1Profit,2),x,y+(line*17),12,r1Color);
+   CreateDashboardLabel(DASH_PREFIX+"R2","RECOVERY 2 : "+(RecoveryStage>=2?"ACTIVE":"OFF")+"   | LOT = "+DoubleToString(Recovery2Lots,2)+"   | P/L = "+DoubleToString(Recovery2Profit,2),x,y+(line*18),12,r2Color);
+   CreateDashboardLabel(DASH_PREFIX+"RECOVERYCFG","RECOVERY TRIGGER : AFTER PRIMARY #"+IntegerToString(MaxOrders)+"   | ANCHOR = LAST PRIMARY",x,y+(line*19),12,clrWhite);
+   CreateDashboardLabel(DASH_PREFIX+"RECOVERYSET","R1 MULT/GAP : "+DoubleToString(Recovery1Multiplier,2)+" / "+DoubleToString(Recovery1GapPoints,0)+"   | R2 MULT/GAP : "+DoubleToString(Recovery2Multiplier,2)+" / "+DoubleToString(Recovery2GapPoints,0),x,y+(line*20),12,clrWhite);
+   CreateDashboardDivider(DASH_PREFIX+"DIV_RECOVERY",x,y+(line*21)+5,800,clrOrange);
+
+   CreateDashboardLabel(DASH_PREFIX+"TARGET","BASKET TARGET : "+DoubleToString(TargetProfitUSD,2)+" USD   | TRAIL = "+(BasketTrailingActive?"ON":"OFF")+"   | PEAK = "+DoubleToString(BasketPeakProfit,2),x,y+(line*22),12,clrWhite);
+   CreateDashboardLabel(DASH_PREFIX+"TRAILSET","TRAIL START : "+DoubleToString(TrailingStartUSD,2)+"   | TRAIL STOP : "+DoubleToString(TrailingStopUSD,2),x,y+(line*23),12,clrWhite);
+   CreateDashboardLabel(DASH_PREFIX+"DD","EQUITY DD : "+DoubleToString(dd,2)+"%   | MAX DD STOP : "+DoubleToString(MaxEquityLossPercent,2)+"%",x,y+(line*24),12,ddColor);
+   CreateDashboardDivider(DASH_PREFIX+"DIV_RISK",x,y+(line*25)+5,800,clrOrange);
+
+   CreateDashboardLabel(DASH_PREFIX+"NEWS","NEWS : "+NewsStatusText()+"   | "+NewsCurrency+"   | HIGH IMPACT = "+(NewsHighImpactOnly?"ON":"OFF"),x,y+(line*26),12,newsColor);
+   CreateDashboardLabel(DASH_PREFIX+"NEXTNEWS","NEXT NEWS : "+NewsNextText(),x,y+(line*27),12,clrWhite);
+   CreateDashboardLabel(DASH_PREFIX+"NEWSRULE","BLOCK ENTRY / GRID / RECOVERY : "+(BlockNewEntries?"ON":"OFF")+" / "+(BlockGridExpansion?"ON":"OFF")+" / "+(BlockRecovery?"ON":"OFF"),x,y+(line*28),12,clrWhite);
+   CreateDashboardDivider(DASH_PREFIX+"DIV_NEWS",x,y+(line*29)+5,800,clrOrange);
+
+   CreateDashboardLabel(DASH_PREFIX+"MAGIC","MAGIC : "+IntegerToString(OrdersID)+"   |   COMMENT : "+CommentsOrders,x,y+(line*30),12,clrWhite);
+   CreateDashboardLabel(DASH_PREFIX+"TZ","SERVER UTC : "+DoubleToString(ServerUTCOffsetHours,1)+"   | STRATEGY UTC : "+DoubleToString(StrategyUTCOffsetHours,1)+" (WIB)",x,y+(line*31),12,clrSilver);
+   CreateDashboardLabel(DASH_PREFIX+"TARGETSTATUS","DAILY TARGET STATUS : "+(DailyTargetReached?"LOCKED UNTIL NEXT WIB DAY":"ACTIVE"),x,y+(line*32),12,DailyTargetReached?clrRed:clrLime);
    ChartRedraw();
 }
 
