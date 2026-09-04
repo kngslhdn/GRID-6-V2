@@ -1,0 +1,56 @@
+//+------------------------------------------------------------------+
+//| GRID 06.V18 - WIB STRATEGY CLOCK                                |
+//| V15.02 engine + Daily Target, Trading Hours and Day Reset in WIB |
+//+------------------------------------------------------------------+
+#property strict
+#property version "18.01"
+#property description "GRID 06 V18 - WIB Strategy Time"
+
+//================ TIMEZONE =================//
+// Exness currently documents its trading server time as GMT+0.
+// Set this to the actual broker server UTC offset used by the test/live account.
+input double ServerUTCOffsetHours = 0.0;
+input double StrategyUTCOffsetHours = 7.0; // WIB = UTC+7
+
+// Return raw broker/server time before TimeCurrent is macro-mapped.
+datetime GridServerTimeRaw()
+{
+   return TimeCurrent();
+}
+
+// Convert broker/server wall-clock time to the configured strategy timezone.
+datetime GridStrategyTime()
+{
+   double deltaHours = StrategyUTCOffsetHours - ServerUTCOffsetHours;
+   return GridServerTimeRaw() + (datetime)MathRound(deltaHours * 3600.0);
+}
+
+// HistorySelect requires SERVER timestamps. The V15 engine will pass WIB
+// timestamps after TimeCurrent() is mapped, so convert them back to server time.
+bool GridHistorySelectWIB(datetime fromDate, datetime toDate)
+{
+   double deltaHours = StrategyUTCOffsetHours - ServerUTCOffsetHours;
+   int deltaSeconds = (int)MathRound(deltaHours * 3600.0);
+   return HistorySelect(fromDate - deltaSeconds, toDate - deltaSeconds);
+}
+
+// The included V15 engine keeps all trading logic intact. These macros only
+// change the clock used by its time/session/daily-target functions.
+#define TimeCurrent GridStrategyTime
+#define HistorySelect GridHistorySelectWIB
+#define CommentsOrders V18CommentsOrders
+
+#include "Grid 06 V15"
+
+#undef CommentsOrders
+#undef HistorySelect
+#undef TimeCurrent
+
+//+------------------------------------------------------------------+
+//| V18 TIME MODEL                                                   |
+//|                                                                  |
+//| Trading Hour : WIB                                               |
+//| Daily Target : WIB calendar day                                  |
+//| History P/L  : server history converted to WIB day boundaries    |
+//| Execution    : broker/server as normal                           |
+//+------------------------------------------------------------------+
