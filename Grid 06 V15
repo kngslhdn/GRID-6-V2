@@ -2,9 +2,10 @@
 //| GRID 06.V15 - PROFIT DIRECTION + TWO-STAGE RECOVERY             |
 //| V12 base logic preserved; profit-side pyramiding added          |
 //| Loss grid and Recovery 1/2 remain independent and unchanged     |
+//| Daily target lock added: server-day realized+floating P/L       |
 //+------------------------------------------------------------------+
 #property strict
-#property version "15.01"
+#property version "15.02"
 
 #include <Trade/Trade.mqh>
 CTrade trade;
@@ -16,6 +17,10 @@ input double TargetProfitUSD        = 10.0;
 input bool   UseTrailingProfit       = true;
 input double TrailingStartUSD       = 5.0;
 input double TrailingStopUSD        = 3.0;
+
+//================ DAILY TARGET =================//
+input bool   EnableDailyTarget      = true;
+input double DailyTargetProfitUSD   = 50.0;
 
 //================ RISK =================//
 input double MaxEquityLossPercent   = 80.0;
@@ -84,6 +89,124 @@ bool BasketTrailingActive=false;
 bool IsTerminated=false;
 double InitialBalance=0;
 double HighWaterMark=0;
+
+// Daily target state - all time references use broker/server time (TimeCurrent()).
+int DailyTargetYear=0;
+int DailyTargetDayOfYear=0;
+double DailyStartBalance=0;
+bool DailyTargetReached=false;
+
+//+------------------------------------------------------------------+
+//| FUNCTION: GetServerDayKey                                        |
+//+------------------------------------------------------------------+
+int GetServerDayKey(){
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(),dt);
+   return dt.year*1000+dt.day_of_year;
+}
+
+//+------------------------------------------------------------------+
+//| FUNCTION: ResetDailyTargetIfNewDay                               |
+//+------------------------------------------------------------------+
+void ResetDailyTargetIfNewDay(){
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(),dt);
+   int key=dt.year*1000+dt.day_of_year;
+
+   if(DailyTargetYear==dt.year && DailyTargetDayOfYear==dt.day_of_year)
+      return;
+
+   DailyTargetYear=dt.year;
+   DailyTargetDayOfYear=dt.day_of_year;
+   DailyStartBalance=AccountInfoDouble(ACCOUNT_BALANCE);
+   DailyTargetReached=false;
+
+   PrintFormat("V15 DAILY RESET | server=%s | startBalance=%.2f",
+               TimeToString(TimeCurrent(),TIME_DATE|TIME_SECONDS),DailyStartBalance);
+}
+
+//+------------------------------------------------------------------+
+//| FUNCTION: GetDailyRealizedProfit                                 |
+//| Realized P/L since the start of the current broker/server day.   |
+//+------------------------------------------------------------------+
+double GetDailyRealizedProfit(){
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(),dt);
+   dt.hour=0;
+   dt.min=0;
+   dt.sec=0;
+   datetime dayStart=StructToTime(dt);
+   datetime now=TimeCurrent();
+
+   if(!HistorySelect(dayStart,now))
+      return 0.0;
+
+   double result=0.0;
+   int deals=HistoryDealsTotal();
+   for(int i=0;i<deals;i++){
+      ulong ticket=HistoryDealGetTicket(i);
+      if(ticket==0) continue;
+
+      if((long)HistoryDealGetInteger(ticket,DEAL_MAGIC)!=OrdersID) continue;
+      if(HistoryDealGetString(ticket,DEAL_SYMBOL)!=SymbolTrade) continue;
+
+      long entry=HistoryDealGetInteger(ticket,DEAL_ENTRY);
+      if(entry!=DEAL_ENTRY_OUT && entry!=DEAL_ENTRY_OUT_BY && entry!=DEAL_ENTRY_INOUT)
+         continue;
+
+      result += HistoryDealGetDouble(ticket,DEAL_PROFIT);
+      result += HistoryDealGetDouble(ticket,DEAL_SWAP);
+      result += HistoryDealGetDouble(ticket,DEAL_COMMISSION);
+      result += HistoryDealGetDouble(ticket,DEAL_FEE);
+   }
+   return result;
+}
+
+//+------------------------------------------------------------------+
+//| FUNCTION: GetDailyProfit                                        |
+//| Realized current-day P/L + current floating P/L.                 |
+//| At the moment the target is checked this represents the profit   |
+//| that would remain attributable to the EA for today's session.    |
+//+------------------------------------------------------------------+
+double GetDailyProfit(){
+   if(!EnableDailyTarget) return 0.0;
+   return GetDailyRealizedProfit()+BasketProfitValue;
+}
+
+//+------------------------------------------------------------------+
+//| FUNCTION: LockDailyTarget                                       |
+//| Closes exposure and prevents ALL new entries until next day.     |
+//+------------------------------------------------------------------+
+void LockDailyTarget(){
+   if(DailyTargetReached) return;
+
+   DailyTargetReached=true;
+   DeleteRecoveryPending();
+   CloseAllExposure();
+   UpdateStatus();
+
+   PrintFormat("V15 DAILY TARGET REACHED | target=%.2f | dailyProfit=%.2f | server=%s | trading locked until next server day",
+               DailyTargetProfitUSD,GetDailyProfit(),
+               TimeToString(TimeCurrent(),TIME_DATE|TIME_SECONDS));
+}
+
+//+------------------------------------------------------------------+
+//| FUNCTION: CheckDailyTarget                                     |
+//| Returns true when the EA must stop all normal trading this tick. |
+//+------------------------------------------------------------------+
+bool CheckDailyTarget(){
+   if(!EnableDailyTarget || DailyTargetProfitUSD<=0.0) return false;
+
+   ResetDailyTargetIfNewDay();
+   if(DailyTargetReached) return true;
+
+   double dailyProfit=GetDailyProfit();
+   if(dailyProfit>=DailyTargetProfitUSD){
+      LockDailyTarget();
+      return true;
+   }
+   return false;
+}
 
 //+------------------------------------------------------------------+
 //| FUNCTION: IsTradingHour                                         |
@@ -168,6 +291,7 @@ int OnInit(){
    trade.SetTypeFillingBySymbol(SymbolTrade);
    if(HandleRSI==INVALID_HANDLE || HandleMA==INVALID_HANDLE) return INIT_FAILED;
    if(AccountInfoInteger(ACCOUNT_MARGIN_MODE)!=ACCOUNT_MARGIN_MODE_RETAIL_HEDGING) return INIT_FAILED;
+   ResetDailyTargetIfNewDay();
    UpdateStatus();
    return INIT_SUCCEEDED;
 }
@@ -187,6 +311,9 @@ void OnDeinit(const int reason){
 void OnTick(){
    if(IsTerminated || !TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)) return;
 
+   // New broker/server day automatically clears the daily lock.
+   ResetDailyTargetIfNewDay();
+
    UpdateStatus();
    double balance=AccountInfoDouble(ACCOUNT_BALANCE);
    double equity=AccountInfoDouble(ACCOUNT_EQUITY);
@@ -200,9 +327,21 @@ void OnTick(){
       return;
    }
 
+   // Daily target has priority over every entry engine.
+   if(CheckDailyTarget()){
+      DisplayDashboard(dd);
+      return;
+   }
+
    // Trailing/target logic remains unchanged in principle and runs first.
    ManageBasketExit();
    UpdateStatus();
+
+   // Re-check after basket exit because a realized close can complete the daily target.
+   if(CheckDailyTarget()){
+      DisplayDashboard(dd);
+      return;
+   }
 
    // HARD SESSION CLOSE: outside 07:00-22:00 no EA exposure.
    if(UseTradingHour && !IsTradingHour()){
@@ -634,14 +773,18 @@ void CloseBasket(){
 //+------------------------------------------------------------------+
 void DisplayDashboard(double dd){
    string state="IDLE";
-   if(RecoveryStage==2) state="RECOVERY 2 ACTIVE";
+   if(DailyTargetReached) state="DAILY TARGET REACHED - LOCKED";
+   else if(RecoveryStage==2) state="RECOVERY 2 ACTIVE";
    else if(RecoveryStage==1) state="RECOVERY 1 ACTIVE";
    else if(BuyOrders>0) state=(BuyProfit>0?"PRIMARY BUY / PROFIT MODE":"PRIMARY BUY / LOSS MODE");
    else if(SellOrders>0) state=(SellProfit>0?"PRIMARY SELL / PROFIT MODE":"PRIMARY SELL / LOSS MODE");
 
+   double dailyProfit=GetDailyProfit();
+
    Comment("===== GRID 06 V15 =====\n",
            "State: ",state,"\n",
            "BASKET P/L: ",DoubleToString(BasketProfitValue,2),"\n",
+           "DAILY P/L: ",DoubleToString(dailyProfit,2)," / ",DoubleToString(DailyTargetProfitUSD,2)," | Daily Target: ",(EnableDailyTarget?"ON":"OFF"),"\n",
            "BUY: ",BuyOrders," | lot=",DoubleToString(BuyLots,2)," | P/L=",DoubleToString(BuyProfit,2),"\n",
            "SELL: ",SellOrders," | lot=",DoubleToString(SellLots,2)," | P/L=",DoubleToString(SellProfit,2),"\n",
            "Loss Gap: ",DoubleToString(PointsForFirstGap,0)," | Mult: ",DoubleToString(GapMultiplier,2),"\n",
