@@ -1038,138 +1038,574 @@ void DrawSectionTitle(string key,string text,int x,int y)
 
 //+------------------------------------------------------------------+
 //| FUNCTION: DisplayDashboard                                      |
+//| GRID 06 V19 - New Figma Dashboard                               |
 //+------------------------------------------------------------------+
 void DisplayDashboard(double dd)
 {
-   int x=14;
-   int y=10;
-   int w=413;
+   //=================================================================
+   // DASHBOARD POSITION / SIZE
+   //=================================================================
+   int x = 14;
+   int y = 10;
+   int w = 441;
+   int h = 615;
 
-   MakeBox(DASH_PREFIX+"BG",x,y,w,590,
-           ColorToARGB(C'255,93,2',128),
-           ColorToARGB(C'255,93,2',220));
+   color ORANGE      = ColorToARGB(C'255,93,2',220);
+   color ORANGE_SOFT = ColorToARGB(C'255,189,157',255);
+   color DARK        = ColorToARGB(C'17,11,5',210);
+   color GREEN       = C'34,197,94';
+   color GREEN_DARK  = C'13,89,13';
+   color WHITE       = clrWhite;
 
-   SetDashboardText(DASH_PREFIX+"TITLE","↗  GRID 06 V19",30,28,12,clrWhite);
-   SetDashboardText(DASH_PREFIX+"ACTIVE","• ACTIVE",143,28,12,clrLime);
-   SetDashboardText(DASH_PREFIX+"MAGIC","MAGIC: "+IntegerToString(OrdersID),300,22,8,ColorToARGB(C'255,189,157',255));
-   SetDashboardText(DASH_PREFIX+"TZ",
-                    "UTC: "+DoubleToString(ServerUTCOffsetHours,1)+
-                    " | STRATEGY UTC: "+DoubleToString(StrategyUTCOffsetHours,1)+" (WIB)",
-                    249,34,7,ColorToARGB(C'255,189,157',255));
+   //=================================================================
+   // OUTER PANEL
+   //=================================================================
+   MakeBox(DASH_PREFIX+"BG",
+           x,y,w,h,
+           ColorToARGB(C'17,11,5',128),
+           ORANGE);
 
-   MakeDivider(DASH_PREFIX+"HDR",30,51,381);
+   //=================================================================
+   // HEADER
+   //=================================================================
+   SetDashboardText(
+      DASH_PREFIX+"TITLE",
+      "↗  GRID 06 V19",
+      x+16,
+      y+17,
+      12,
+      WHITE
+   );
 
-   MakeBox(DASH_PREFIX+"OV",30,62,381,73,
-           ColorToARGB(C'17,11,5',210),clrLime);
+   SetDashboardText(
+      DASH_PREFIX+"ACTIVE",
+      "• ACTIVE",
+      x+143,
+      y+17,
+      12,
+      GREEN
+   );
 
-   DrawMetric(DASH_PREFIX+"O1","P/L :",
-              DoubleToString(BasketProfitValue,2)+" USD",
-              "TARGET :",EnableDailyTarget?"ON":"OFF",
-              "EQUITY :",DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY),2),
-              42,77,350,8);
+   SetDashboardText(
+      DASH_PREFIX+"MAGIC",
+      "MAGIC: "+IntegerToString(OrdersID),
+      x+306,
+      y+13,
+      8,
+      ORANGE_SOFT
+   );
 
-   DrawMetric(DASH_PREFIX+"O2","BALANCE :",
-              DoubleToString(AccountInfoDouble(ACCOUNT_BALANCE),2),
-              "MAX DD STOP :",DoubleToString(MaxEquityLossPercent,2)+"%",
-              "CURRENT DD :",DoubleToString(dd,2)+"%",
-              42,99,350,8);
+   SetDashboardText(
+      DASH_PREFIX+"TZ",
+      "UTC: "+DoubleToString(ServerUTCOffsetHours,1)+
+      " | STRATEGY UTC: "+
+      DoubleToString(StrategyUTCOffsetHours,1)+" (WIB)",
+      x+247,
+      y+27,
+      7,
+      ORANGE_SOFT
+   );
 
-   MakeProgress(DASH_PREFIX+"PB",42,120,346,7,
-                MaxEquityLossPercent>0?
-                MathMin(1,MathMax(0,dd/MaxEquityLossPercent)):0);
+   MakeDivider(
+      DASH_PREFIX+"HDR",
+      x+20,
+      y+43,
+      401
+   );
 
-   DrawSectionTitle("POS_TITLE","ACTIVE POSITIONS",30,148);
+   //=================================================================
+   // OVERVIEW
+   //=================================================================
+   MakeBox(
+      DASH_PREFIX+"OV",
+      x+20,
+      y+55,
+      401,
+      74,
+      DARK,
+      GREEN
+   );
 
-   MakeBox(DASH_PREFIX+"BUY",30,162,184,70,
-           ColorToARGB(C'17,11,5',210),
-           ColorToARGB(C'255,93,2',180));
-   MakeBox(DASH_PREFIX+"SELL",226,162,185,70,
-           ColorToARGB(C'17,11,5',210),
-           ColorToARGB(C'255,93,2',180));
+   // Row 1
+   DrawMetric(
+      DASH_PREFIX+"O1",
+      "P/L :",
+      DoubleToString(BasketProfitValue,2)+" USD",
 
-   SetDashboardText(DASH_PREFIX+"BIND","●  BUY",40,175,9,clrLime);
-   MakeDivider(DASH_PREFIX+"BD",40,190,164);
-   SetDashboardText(DASH_PREFIX+"BL","LOT : "+DoubleToString(BuyLots,2),40,201,8,clrWhite);
-   SetDashboardText(DASH_PREFIX+"BP","P/L : "+DoubleToString(BuyProfit,2),40,215,8,clrWhite);
+      "TARGET :",
+      EnableDailyTarget ? "ON" : "OFF",
 
-   SetDashboardText(DASH_PREFIX+"SIND","●  SELL",236,175,9,ColorToARGB(C'255,189,157',255));
-   MakeDivider(DASH_PREFIX+"SD",236,190,164);
-   SetDashboardText(DASH_PREFIX+"SL","LOT : "+DoubleToString(SellLots,2),236,201,8,clrWhite);
-   SetDashboardText(DASH_PREFIX+"SP","P/L : "+DoubleToString(SellProfit,2),236,215,8,clrWhite);
+      "EQUITY :",
+      DoubleToString(
+         AccountInfoDouble(ACCOUNT_EQUITY),2
+      ),
 
-   DrawSectionTitle("GRID_TITLE","GRID PARAMETERS",30,245);
+      x+32,
+      y+69,
+      377,
+      8
+   );
 
-   MakeBox(DASH_PREFIX+"GRID",30,259,381,57,
-           ColorToARGB(C'17,11,5',210),
-           ColorToARGB(C'255,93,2',180));
+   // Row 2
+   DrawMetric(
+      DASH_PREFIX+"O2",
+      "BALANCE :",
+      DoubleToString(
+         AccountInfoDouble(ACCOUNT_BALANCE),2
+      ),
 
-   DrawMetric(DASH_PREFIX+"G1","MAX PRIMARY :",IntegerToString(MaxOrders),
-              "LOSS GAP :",DoubleToString(PointsForFirstGap,0),
-              "MULT :",DoubleToString(GapMultiplier,2),40,274,350,8);
+      "MAX DD STOP :",
+      DoubleToString(MaxEquityLossPercent,2)+"%",
 
-   DrawMetric(DASH_PREFIX+"G2","DIRECTION :",EnableProfitDirection?"ON":"OFF",
-              "GAP :",DoubleToString(PointsForProfitGap,0),
-              "","",40,296,350,8);
+      "CURRENT DD :",
+      DoubleToString(dd,2)+"%",
 
-   DrawSectionTitle("REC_TITLE","RECOVERY SETTINGS",30,329);
+      x+32,
+      y+91,
+      377,
+      8
+   );
 
-   MakeBox(DASH_PREFIX+"REC",30,343,381,108,
-           ColorToARGB(C'17,11,5',210),
-           ColorToARGB(C'255,93,2',180));
+   //=================================================================
+   // TARGET PROGRESS
+   //=================================================================
+   double targetProgress = 0.0;
 
-   DrawMetric(DASH_PREFIX+"R1","R1 :",RecoveryStage>=1?"ACTIVE":"OFF",
-              "LOT :",DoubleToString(Recovery1Lots,2),
-              "P/L :",DoubleToString(Recovery1Profit,2),40,358,350,8);
-   MakeDivider(DASH_PREFIX+"R1D",40,372,350);
+   if(EnableDailyTarget && TargetProfitUSD > 0.0)
+   {
+      targetProgress =
+         BasketProfitValue / TargetProfitUSD;
 
-   DrawMetric(DASH_PREFIX+"R2","R2 :",RecoveryStage>=2?"ACTIVE":"OFF",
-              "LOT :",DoubleToString(Recovery2Lots,2),
-              "P/L :",DoubleToString(Recovery2Profit,2),40,382,350,8);
-   MakeDivider(DASH_PREFIX+"R2D",40,396,350);
+      targetProgress =
+         MathMin(1.0,MathMax(0.0,targetProgress));
+   }
 
-   DrawMetric(DASH_PREFIX+"RT","TRIGGER :",
-              "AFTER PRIMARY #"+IntegerToString(MaxOrders),
-              "ANCHOR :","LAST PRIMARY","","",40,406,350,7);
-   MakeDivider(DASH_PREFIX+"RTD",40,420,350);
+   MakeProgress(
+      DASH_PREFIX+"PB",
+      x+32,
+      y+109,
+      377,
+      8,
+      targetProgress
+   );
 
-   DrawMetric(DASH_PREFIX+"RS","R1 MULT/GAP :",
-              DoubleToString(Recovery1Multiplier,2)+" / "+DoubleToString(Recovery1GapPoints,0),
-              "R2 MULT/GAP :",
-              DoubleToString(Recovery2Multiplier,2)+" / "+DoubleToString(Recovery2GapPoints,0),
-              "","",40,431,350,7);
+   //=================================================================
+   // ACTIVE POSITIONS
+   //=================================================================
+   DrawSectionTitle(
+      "POS_TITLE",
+      "ACTIVE POSITIONS",
+      x+6,
+      y+140
+   );
 
-   DrawSectionTitle("TR_TITLE","BASKET & TRAIL SETTINGS",30,465);
+   // BUY
+   MakeBox(
+      DASH_PREFIX+"BUY",
+      x+20,
+      y+163,
+      194,
+      71,
+      DARK,
+      ColorToARGB(C'255,93,2',180)
+   );
 
-   MakeBox(DASH_PREFIX+"TR",30,479,381,72,
-           ColorToARGB(C'17,11,5',210),
-           ColorToARGB(C'255,93,2',180));
+   // SELL
+   MakeBox(
+      DASH_PREFIX+"SELL",
+      x+227,
+      y+163,
+      194,
+      71,
+      DARK,
+      ColorToARGB(C'255,93,2',180)
+   );
 
-   DrawMetric(DASH_PREFIX+"T1","TARGET :",
-              DoubleToString(TargetProfitUSD,2)+" USD",
-              "TRAIL :",BasketTrailingActive?"ON":"OFF",
-              "PEAK :",DoubleToString(BasketPeakProfit,2),40,494,350,8);
-   MakeDivider(DASH_PREFIX+"TD",40,508,350);
+   // BUY HEADER
+   SetDashboardText(
+      DASH_PREFIX+"BIND",
+      "●  BUY",
+      x+30,
+      y+176,
+      9,
+      GREEN
+   );
 
-   DrawMetric(DASH_PREFIX+"T2","START :",DoubleToString(TrailingStartUSD,2),
-              "TRAIL STOP :",DoubleToString(TrailingStopUSD,2),
-              "","",40,519,350,8);
+   MakeDivider(
+      DASH_PREFIX+"BD",
+      x+30,
+      y+190,
+      174
+   );
 
-   MakeDivider(DASH_PREFIX+"FOOT",30,563,381);
+   SetDashboardText(
+      DASH_PREFIX+"BL",
+      "LOT : "+DoubleToString(BuyLots,2),
+      x+30,
+      y+201,
+      8,
+      WHITE
+   );
 
-   SetDashboardText(DASH_PREFIX+"NEWS",
-                    "NEWS : "+NewsStatusText(),30,570,8,
-                    ColorToARGB(C'255,189,157',255));
-   SetDashboardText(DASH_PREFIX+"HI","HIGH IMPACT :",105,570,8,
-                    ColorToARGB(C'255,189,157',255));
-   SetDashboardText(DASH_PREFIX+"HIV",NewsHighImpactOnly?"ON":"OFF",170,570,8,C'13,89,13');
-   SetDashboardText(DASH_PREFIX+"RULE","ENTRY/GRID/RECOVERY:",215,570,8,
-                    ColorToARGB(C'255,189,157',255));
-   SetDashboardText(DASH_PREFIX+"RULEV",
-                    (BlockNewEntries?"ON":"OFF")+" / "+
-                    (BlockGridExpansion?"ON":"OFF")+" / "+
-                    (BlockRecovery?"ON":"OFF"),
-                    327,570,8,C'13,89,13');
+   SetDashboardText(
+      DASH_PREFIX+"BP",
+      "P/L : "+DoubleToString(BuyProfit,2),
+      x+30,
+      y+215,
+      8,
+      BuyProfit >= 0.0 ? WHITE : ORANGE_SOFT
+   );
 
+   // SELL HEADER
+   SetDashboardText(
+      DASH_PREFIX+"SIND",
+      "●  SELL",
+      x+237,
+      y+176,
+      9,
+      ORANGE_SOFT
+   );
+
+   MakeDivider(
+      DASH_PREFIX+"SD",
+      x+237,
+      y+190,
+      174
+   );
+
+   SetDashboardText(
+      DASH_PREFIX+"SL",
+      "LOT : "+DoubleToString(SellLots,2),
+      x+237,
+      y+201,
+      8,
+      WHITE
+   );
+
+   SetDashboardText(
+      DASH_PREFIX+"SP",
+      "P/L : "+DoubleToString(SellProfit,2),
+      x+237,
+      y+215,
+      8,
+      SellProfit >= 0.0 ? WHITE : ORANGE_SOFT
+   );
+
+   //=================================================================
+   // GRID PARAMETERS
+   //=================================================================
+   DrawSectionTitle(
+      "GRID_TITLE",
+      "GRID PARAMETERS",
+      x+6,
+      y+238
+   );
+
+   MakeBox(
+      DASH_PREFIX+"GRID",
+      x+20,
+      y+252,
+      401,
+      58,
+      DARK,
+      ColorToARGB(C'255,93,2',180)
+   );
+
+   DrawMetric(
+      DASH_PREFIX+"G1",
+
+      "MAX PRIMARY :",
+      IntegerToString(MaxOrders),
+
+      "LOSS GAP :",
+      DoubleToString(PointsForFirstGap,0),
+
+      "MULT :",
+      DoubleToString(GapMultiplier,2),
+
+      x+30,
+      y+263,
+      381,
+      8
+   );
+
+   MakeDivider(
+      DASH_PREFIX+"GD",
+      x+30,
+      y+281,
+      381
+   );
+
+   DrawMetric(
+      DASH_PREFIX+"G2",
+
+      "DIRECTION :",
+      EnableProfitDirection ? "ON" : "OFF",
+
+      "GAP :",
+      DoubleToString(PointsForProfitGap,0),
+
+      "",
+      "",
+
+      x+30,
+      y+289,
+      381,
+      8
+   );
+
+   //=================================================================
+   // RECOVERY SETTINGS
+   //=================================================================
+   DrawSectionTitle(
+      "REC_TITLE",
+      "RECOVERY SETTINGS",
+      x+6,
+      y+322
+   );
+
+   MakeBox(
+      DASH_PREFIX+"REC",
+      x+20,
+      y+336,
+      401,
+      127,
+      DARK,
+      ColorToARGB(C'255,93,2',180)
+   );
+
+   // R1
+   DrawMetric(
+      DASH_PREFIX+"R1",
+
+      "R1 :",
+      RecoveryStage >= 1 ? "ACTIVE" : "OFF",
+
+      "LOT :",
+      DoubleToString(Recovery1Lots,2),
+
+      "P/L :",
+      DoubleToString(Recovery1Profit,2),
+
+      x+30,
+      y+347,
+      381,
+      8
+   );
+
+   MakeDivider(
+      DASH_PREFIX+"R1D",
+      x+30,
+      y+365,
+      381
+   );
+
+   // R2
+   DrawMetric(
+      DASH_PREFIX+"R2",
+
+      "R2 :",
+      RecoveryStage >= 2 ? "ACTIVE" : "OFF",
+
+      "LOT :",
+      DoubleToString(Recovery2Lots,2),
+
+      "P/L :",
+      DoubleToString(Recovery2Profit,2),
+
+      x+30,
+      y+373,
+      381,
+      8
+   );
+
+   MakeDivider(
+      DASH_PREFIX+"R2D",
+      x+30,
+      y+391,
+      381
+   );
+
+   // TRIGGER / ANCHOR
+   DrawMetric(
+      DASH_PREFIX+"RT",
+
+      "TRIGGER :",
+      "AFTER PRIMARY #"+IntegerToString(MaxOrders),
+
+      "ANCHOR :",
+      "LAST PRIMARY",
+
+      "",
+      "",
+
+      x+30,
+      y+399,
+      381,
+      7
+   );
+
+   MakeDivider(
+      DASH_PREFIX+"RTD",
+      x+30,
+      y+417,
+      381
+   );
+
+   // MULT / GAP
+   DrawMetric(
+      DASH_PREFIX+"RS",
+
+      "R1 MULT/GAP :",
+      DoubleToString(Recovery1Multiplier,2)+
+      " / "+
+      DoubleToString(Recovery1GapPoints,0),
+
+      "R2 MULT/GAP :",
+      DoubleToString(Recovery2Multiplier,2)+
+      " / "+
+      DoubleToString(Recovery2GapPoints,0),
+
+      "",
+      "",
+
+      x+30,
+      y+425,
+      381,
+      7
+   );
+
+   //=================================================================
+   // BASKET & TRAIL
+   //=================================================================
+   DrawSectionTitle(
+      "TR_TITLE",
+      "BASKET & TRAIL SETTINGS",
+      x+6,
+      y+474
+   );
+
+   MakeBox(
+      DASH_PREFIX+"TR",
+      x+20,
+      y+488,
+      401,
+      72,
+      DARK,
+      ColorToARGB(C'255,93,2',180)
+   );
+
+   // TARGET / TRAIL / PEAK
+   DrawMetric(
+      DASH_PREFIX+"T1",
+
+      "TARGET :",
+      DoubleToString(TargetProfitUSD,2)+" USD",
+
+      "TRAIL :",
+      BasketTrailingActive ? "ON" : "OFF",
+
+      "PEAK :",
+      DoubleToString(BasketPeakProfit,2),
+
+      x+30,
+      y+499,
+      381,
+      8
+   );
+
+   MakeDivider(
+      DASH_PREFIX+"TD",
+      x+30,
+      y+517,
+      381
+   );
+
+   // START / TRAIL STOP
+   DrawMetric(
+      DASH_PREFIX+"T2",
+
+      "START :",
+      DoubleToString(TrailingStartUSD,2),
+
+      "TRAIL STOP :",
+      DoubleToString(TrailingStopUSD,2),
+
+      "",
+      "",
+
+      x+30,
+      y+525,
+      381,
+      8
+   );
+
+   //=================================================================
+   // FOOTER
+   //=================================================================
+   MakeDivider(
+      DASH_PREFIX+"FOOT",
+      x+20,
+      y+573,
+      401
+   );
+
+   // NEWS
+   SetDashboardText(
+      DASH_PREFIX+"NEWS",
+      "NEWS : "+NewsStatusText(),
+      x+20,
+      y+580,
+      8,
+      ORANGE_SOFT
+   );
+
+   // HIGH IMPACT
+   SetDashboardText(
+      DASH_PREFIX+"HI",
+      "HIGH IMPACT :",
+      x+94,
+      y+580,
+      8,
+      ORANGE_SOFT
+   );
+
+   SetDashboardText(
+      DASH_PREFIX+"HIV",
+      NewsHighImpactOnly ? "ON" : "OFF",
+      x+178,
+      y+580,
+      8,
+      NewsHighImpactOnly ? GREEN_DARK : ORANGE_SOFT
+   );
+
+   // ENGINE STATUS
+   SetDashboardText(
+      DASH_PREFIX+"RULE",
+      "ENTRY/GRID/RECOVERY:",
+      x+200,
+      y+580,
+      8,
+      ORANGE_SOFT
+   );
+
+   SetDashboardText(
+      DASH_PREFIX+"RULEV",
+      (BlockNewEntries ? "ON" : "OFF")+
+      " / "+
+      (BlockGridExpansion ? "ON" : "OFF")+
+      " / "+
+      (BlockRecovery ? "ON" : "OFF"),
+
+      x+340,
+      y+580,
+      8,
+      GREEN_DARK
+   );
+
+   //=================================================================
+   // REFRESH
+   //=================================================================
    ChartRedraw();
 }
 
