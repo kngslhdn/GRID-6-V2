@@ -46,7 +46,7 @@ input bool   EnableDailyTarget       = true;
 input double DailyTargetProfitUSD    = 50.0;
 
 //================ RISK =================//
-input double MaxEquityLossPercent    = 80.0;
+input double MaxEquityLossPercent    = 20.0; // Equity high-water drawdown stop
 
 //================ PRIMARY =================//
 input int    MAPeriod                = 200;
@@ -65,6 +65,13 @@ input double PointsForProfitGap      = 1000.0;
 
 input double ManualLotSize           = 0.01;
 input int    MaxOrders               = 3;
+
+//================ EXECUTION SAFETY =================//
+// Set a limit to 0 only when deliberately disabling that protection.
+input double MaxTotalLots             = 3.0;
+input double MinimumFreeMarginPercent = 70.0;
+input double MaxSpreadPoints          = 500.0;
+input int    EntryCooldownSeconds     = 30;
 
 //================ RECOVERY =================//
 // Recovery is flexible and triggered from MaxOrders, not hard-coded order #3.
@@ -122,6 +129,7 @@ bool RecoveryActive=false;
 
 double BasketProfitValue=0;
 double BasketPeakProfit=0;
+datetime LastEntryTime=0;
 bool BasketTrailingActive=false;
 bool IsTerminated=false;
 double InitialBalance=0;
@@ -291,6 +299,55 @@ double NormalizeVolume(double v)
    int digits=(st<0.01)?3:2;
    if(st<0.001) digits=4;
    return NormalizeDouble(v,digits);
+}
+
+//+------------------------------------------------------------------+
+//| FUNCTION: CanOpenNewPosition                                     |
+//+------------------------------------------------------------------+
+bool CanOpenNewPosition(double volume)
+{
+   if(volume<=0) return false;
+
+   double point=SymbolInfoDouble(SymbolTrade,SYMBOL_POINT);
+   double bid=SymbolInfoDouble(SymbolTrade,SYMBOL_BID);
+   double ask=SymbolInfoDouble(SymbolTrade,SYMBOL_ASK);
+
+   if(point<=0 || bid<=0 || ask<=0 || ask<bid)
+      return false;
+
+   if(MaxSpreadPoints>0 && (ask-bid)/point>MaxSpreadPoints)
+   {
+      PrintFormat("V20 ENTRY BLOCKED | spread %.0f > max %.0f points",
+                  (ask-bid)/point,MaxSpreadPoints);
+      return false;
+   }
+
+   double totalLots=BuyLots+SellLots+RecoveryLots;
+   if(MaxTotalLots>0 && totalLots+volume>MaxTotalLots+0.00000001)
+   {
+      PrintFormat("V20 ENTRY BLOCKED | total lots %.2f + %.2f > max %.2f",
+                  totalLots,volume,MaxTotalLots);
+      return false;
+   }
+
+   double equity=AccountInfoDouble(ACCOUNT_EQUITY);
+   double freeMargin=AccountInfoDouble(ACCOUNT_FREEMARGIN);
+   if(equity<=0 || freeMargin<0)
+      return false;
+
+   double freeMarginPercent=freeMargin/equity*100.0;
+   if(MinimumFreeMarginPercent>0 && freeMarginPercent<MinimumFreeMarginPercent)
+   {
+      PrintFormat("V20 ENTRY BLOCKED | free margin %.1f%% < min %.1f%%",
+                  freeMarginPercent,MinimumFreeMarginPercent);
+      return false;
+   }
+
+   if(EntryCooldownSeconds>0 && LastEntryTime>0 &&
+      TimeCurrent()-LastEntryTime<EntryCooldownSeconds)
+      return false;
+
+   return true;
 }
 
 //+------------------------------------------------------------------+
@@ -626,7 +683,7 @@ void ManageRecoveryStage1(ENUM_POSITION_TYPE type)
    if(Recovery1MaxLot>0)
       lot=NormalizeVolume(MathMin(lot,Recovery1MaxLot));
 
-   if(lot<=0) return;
+   if(lot<=0 || !CanOpenNewPosition(lot)) return;
 
    trade.SetExpertMagicNumber(OrdersID);
    trade.SetTypeFillingBySymbol(SymbolTrade);
@@ -642,6 +699,10 @@ void ManageRecoveryStage1(ENUM_POSITION_TYPE type)
    {
       PrintFormat("V20 R1 FAILED retcode=%u | %s",
                   trade.ResultRetcode(),trade.ResultRetcodeDescription());
+   }
+   else
+   {
+      LastEntryTime=TimeCurrent();
    }
 }
 
@@ -681,7 +742,7 @@ void ManageRecoveryStage2()
    if(Recovery2MaxLot>0)
       lot=NormalizeVolume(MathMin(lot,Recovery2MaxLot));
 
-   if(lot<=0) return;
+   if(lot<=0 || !CanOpenNewPosition(lot)) return;
 
    trade.SetExpertMagicNumber(OrdersID);
    trade.SetTypeFillingBySymbol(SymbolTrade);
@@ -697,6 +758,10 @@ void ManageRecoveryStage2()
    {
       PrintFormat("V20 R2 FAILED retcode=%u | %s",
                   trade.ResultRetcode(),trade.ResultRetcodeDescription());
+   }
+   else
+   {
+      LastEntryTime=TimeCurrent();
    }
 }
 
@@ -788,6 +853,7 @@ bool ExecutePrimary(ENUM_ORDER_TYPE type)
    if(count>=MaxOrders) return false;
 
    double lot=NormalizeVolume(ManualLotSize*(count+1));
+   if(!CanOpenNewPosition(lot)) return false;
 
    string comment;
    if(type==ORDER_TYPE_BUY)
@@ -811,7 +877,11 @@ bool ExecutePrimary(ENUM_ORDER_TYPE type)
                   trade.ResultRetcode(),trade.ResultRetcodeDescription());
    }
 
-   return ok && TradeOK();
+   bool success=ok && TradeOK();
+   if(success)
+      LastEntryTime=TimeCurrent();
+
+   return success;
 }
 
 //+------------------------------------------------------------------+
@@ -1161,11 +1231,13 @@ void OnTick()
    double balance=AccountInfoDouble(ACCOUNT_BALANCE);
    double equity=AccountInfoDouble(ACCOUNT_EQUITY);
 
-   if(balance>HighWaterMark)
-      HighWaterMark=balance;
+   // Measure loss from the best equity reached, not only from balance.
+   // This protects profits accumulated while the basket is still open.
+   if(equity>HighWaterMark)
+      HighWaterMark=equity;
 
-   double dd=(equity<balance && balance>0)?
-             (balance-equity)/balance*100.0:0.0;
+   double dd=(equity<HighWaterMark && HighWaterMark>0)?
+             (HighWaterMark-equity)/HighWaterMark*100.0:0.0;
 
    // Maximum equity drawdown has absolute priority.
    if(dd>=MaxEquityLossPercent)
