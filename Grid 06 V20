@@ -930,8 +930,15 @@ bool CheckDailyTarget()
 
    ResetDailyTargetIfNewDay();
 
+   // Keep retrying the protective close on later ticks if a previous
+   // close request was rejected or only partially filled.
    if(DailyTargetReached)
+   {
+      DeleteRecoveryPending();
+      CloseAllExposure();
+      UpdateStatus();
       return true;
+   }
 
    double dailyProfit=GetDailyProfit();
 
@@ -1124,8 +1131,24 @@ void OnTimer()
 //+------------------------------------------------------------------+
 void OnTick()
 {
-   if(IsTerminated || !TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
+   if(!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED))
       return;
+
+   // A drawdown lock must continue attempting to flatten exposure.  A close
+   // can fail transiently (requotes, market closure, or partial execution).
+   if(IsTerminated)
+   {
+      DeleteRecoveryPending();
+      CloseAllExposure();
+      UpdateStatus();
+
+      double haltedBalance=AccountInfoDouble(ACCOUNT_BALANCE);
+      double haltedEquity=AccountInfoDouble(ACCOUNT_EQUITY);
+      double haltedDD=(haltedEquity<haltedBalance && haltedBalance>0)?
+                      (haltedBalance-haltedEquity)/haltedBalance*100.0:0.0;
+      DisplayDashboard(haltedDD);
+      return;
+   }
 
    // New WIB calendar day automatically clears the daily lock.
    ResetDailyTargetIfNewDay();
