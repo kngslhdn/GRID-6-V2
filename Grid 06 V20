@@ -80,6 +80,10 @@ input bool   EnableRecovery          = true;
 input double Recovery1Multiplier     = 2.0;
 input double Recovery1GapPoints      = 10000.0;
 input double Recovery1MaxLot         = 0.50;
+// Hard cap prevents an old saved tester input (for example 10x) from
+// converting the hedge into a large directional position.
+input double RecoveryMaxHedgeMultiplier = 2.0;
+input bool   AllowRecoveryStage2      = false;
 input double Recovery2Multiplier     = 3.0;
 input double Recovery2GapPoints      = 6250.0;
 input double Recovery2MaxLot         = 0.75;
@@ -680,7 +684,9 @@ void ManageRecoveryStage1(ENUM_POSITION_TYPE type)
 
    if(RecoveryOnlyWhenMinus && BasketProfitValue>=0) return;
 
-   double lot=NormalizeVolume(primaryLots*Recovery1Multiplier);
+   double effectiveMultiplier=MathMin(Recovery1Multiplier,
+                                      RecoveryMaxHedgeMultiplier);
+   double lot=NormalizeVolume(primaryLots*effectiveMultiplier);
 
    if(Recovery1MaxLot>0)
       lot=NormalizeVolume(MathMin(lot,Recovery1MaxLot));
@@ -734,7 +740,7 @@ bool ManageRecoveryBasketExit()
 //+------------------------------------------------------------------+
 void ManageRecoveryStage2()
 {
-   if(!EnableRecovery) return;
+   if(!EnableRecovery || !AllowRecoveryStage2) return;
    if(RecoveryStage!=1) return;
    if(MaxRecoveryStages<2) return;
    if(Recovery1Lots<=0 || Recovery1EntryPrice<=0) return;
