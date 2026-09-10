@@ -74,16 +74,18 @@ input double MaxSpreadPoints          = 500.0;
 input int    EntryCooldownSeconds     = 30;
 
 //================ RECOVERY =================//
-// Recovery is flexible and triggered from MaxOrders, not hard-coded order #3.
+// Recovery hedges a completed primary basket.  Large multipliers turn a
+// hedge into a larger directional bet, which is unsafe for volatile XAU.
 input bool   EnableRecovery          = true;
-input double Recovery1Multiplier     = 10.0;
+input double Recovery1Multiplier     = 2.0;
 input double Recovery1GapPoints      = 10000.0;
-input double Recovery1MaxLot         = 2.0;
-input double Recovery2Multiplier     = 30.0;
+input double Recovery1MaxLot         = 0.50;
+input double Recovery2Multiplier     = 3.0;
 input double Recovery2GapPoints      = 6250.0;
-input double Recovery2MaxLot         = 2.0;
+input double Recovery2MaxLot         = 0.75;
 input bool   RecoveryOnlyWhenMinus   = true;
-input int    MaxRecoveryStages       = 2;
+input int    MaxRecoveryStages       = 1;
+input double RecoveryExitProfitUSD   = 2.0;
 
 //================ HOURS =================//
 input bool   UseTradingHour          = true;
@@ -707,6 +709,27 @@ void ManageRecoveryStage1(ENUM_POSITION_TYPE type)
 }
 
 //+------------------------------------------------------------------+
+//| FUNCTION: ManageRecoveryBasketExit                              |
+//| Close the entire rescued basket once the hedge has restored a    |
+//| small net profit.  This prevents a recovered hedge from being   |
+//| held until a later reversal recreates the original loss.         |
+//+------------------------------------------------------------------+
+bool ManageRecoveryBasketExit()
+{
+   if(!RecoveryActive || RecoveryExitProfitUSD<0)
+      return false;
+
+   if(BasketProfitValue<RecoveryExitProfitUSD)
+      return false;
+
+   PrintFormat("V20 RECOVERY EXIT | basket=%.2f | target=%.2f",
+               BasketProfitValue,RecoveryExitProfitUSD);
+   DeleteRecoveryPending();
+   CloseBasket();
+   return true;
+}
+
+//+------------------------------------------------------------------+
 //| FUNCTION: ManageRecoveryStage2                                  |
 //+------------------------------------------------------------------+
 void ManageRecoveryStage2()
@@ -1284,9 +1307,17 @@ void OnTick()
       return;
    }
 
-   // Recovery is isolated from the primary grid.
+   // An active hedge is a rescue state: take the recovered basket profit
+   // first, then only consider the optional second stage.
    if(RecoveryActive)
    {
+      if(ManageRecoveryBasketExit())
+      {
+         UpdateStatus();
+         DisplayDashboard(dd);
+         return;
+      }
+
       if(!IsNewsBlockingRecovery())
          ManageRecoveryStage2();
 
