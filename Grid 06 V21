@@ -27,7 +27,7 @@ input bool   EnableDailyTarget       = true;
 input double DailyTargetProfitUSD    = 50.0;
 
 //================ RISK =================//
-input double MaxEquityLossPercent    = 20.0;
+input double MaxEquityLossPercent    = 40.0;
 
 //================ PRIMARY =================//
 input int    MAPeriod                = 200;
@@ -37,14 +37,14 @@ input int    RSILower                = 41;
 input Type   TypeOrdersPlace         = Open_Buy_And_Sell;
 
 // Loss grid
-input double PointsForFirstGap       = 6250.0;
-input double GapMultiplier           = 1.30;
+input double PointsForFirstGap       = 3000.0;
+input double GapMultiplier           = 1.25;
 
 // Profit-direction expansion
 input bool   EnableProfitDirection   = true;
 input double PointsForProfitGap      = 1000.0;
 
-input double ManualLotSize           = 0.02;
+input double ManualLotSize           = 0.01;
 input int    MaxOrders               = 3;
 
 //================ EXECUTION SAFETY =================//
@@ -60,7 +60,7 @@ input bool   EnableRecovery             = true;
 
 // Stage 1
 input double Recovery1Multiplier        = 2.0;
-input double Recovery1GapPoints         = 10000.0;
+input double Recovery1GapPoints         = 2000.0;
 input double Recovery1MaxLot            = 0.50;
 
 // Stage 2
@@ -76,6 +76,9 @@ input double RecoveryMaxHedgeMultiplier = 2.0;
 input bool   RecoveryOnlyWhenMinus      = true;
 input int    MaxRecoveryStages          = 1;
 input double RecoveryExitProfitUSD      = 2.0;
+
+// $2,500 Recovery Profile: defensive DD threshold before hard 40% stop.
+input double DefensiveEquityLossPercent = 20.0;
 
 //================ HOURS =================//
 input bool   UseTradingHour          = false;
