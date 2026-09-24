@@ -44,7 +44,7 @@ input double GapMultiplier           = 1.30;
 input bool   EnableProfitDirection   = true;
 input double PointsForProfitGap      = 1000.0;
 
-input double ManualLotSize           = 0.01;
+input double ManualLotSize           = 0.02;
 input int    MaxOrders               = 3;
 
 //================ EXECUTION SAFETY =================//
