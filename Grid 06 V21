@@ -131,6 +131,32 @@ string GVHWM="";
 string GVDailyLock="";
 string GVDailyKey="";
 
+void InitPersistentState()
+{
+   GVPrefix=StringFormat("GRID06V21_%s_%d",SymbolTrade,OrdersID);
+   GVHWM=GVPrefix+"_HWM";
+   GVDailyLock=GVPrefix+"_DAILY_LOCK";
+   GVDailyKey=GVPrefix+"_DAILY_KEY";
+
+   double equity=AccountInfoDouble(ACCOUNT_EQUITY);
+
+   if(GlobalVariableCheck(GVHWM))
+      HighWaterMark=MathMax(GlobalVariableGet(GVHWM),equity);
+   else
+   {
+      HighWaterMark=equity;
+      GlobalVariableSet(GVHWM,HighWaterMark);
+   }
+
+   GlobalVariableSet(GVHWM,HighWaterMark);
+}
+
+void SaveHighWaterMark()
+{
+   if(GVHWM!="" && HighWaterMark>0)
+      GlobalVariableSet(GVHWM,HighWaterMark);
+}
+
 //================ NEWS STATE =================//
 bool NewsBlockActive=false;
 bool NewsCloseWindow=false;
@@ -185,13 +211,31 @@ void ResetDailyTargetIfNewDay()
    MqlDateTime dt;
    TimeToStruct(GetStrategyTime(),dt);
 
-   if(DailyTargetYear==dt.year && DailyTargetDayOfYear==dt.day_of_year)
+   int key=GetServerDayKey();
+   double storedKey=GlobalVariableCheck(GVDailyKey)?GlobalVariableGet(GVDailyKey):-1;
+
+   if(DailyTargetYear==dt.year &&
+      DailyTargetDayOfYear==dt.day_of_year &&
+      storedKey==(double)key)
       return;
 
    DailyTargetYear=dt.year;
    DailyTargetDayOfYear=dt.day_of_year;
    DailyStartBalance=AccountInfoDouble(ACCOUNT_BALANCE);
-   DailyTargetReached=false;
+
+   if(storedKey!=(double)key)
+   {
+      DailyTargetReached=false;
+      if(GVDailyKey!="") GlobalVariableSet(GVDailyKey,(double)key);
+      if(GVDailyLock!="") GlobalVariableSet(GVDailyLock,0.0);
+   }
+   else
+   {
+      DailyTargetReached=
+         GVDailyLock!="" &&
+         GlobalVariableCheck(GVDailyLock) &&
+         GlobalVariableGet(GVDailyLock)>0.5;
+   }
 
    PrintFormat("V21 DAILY RESET | WIB=%s | startBalance=%.2f",
                TimeToString(GetStrategyTime(),TIME_DATE|TIME_SECONDS),
@@ -1059,8 +1103,7 @@ void ManageBasketExit()
 
    if(UseTrailingProfit)
    {
-      double arm=MathMax(TargetProfitUSD,
-                         TrailingStartUSD);
+      double arm=TrailingStartUSD;
 
       if(!BasketTrailingActive &&
          profit>=arm)
@@ -1136,6 +1179,8 @@ void LockDailyTarget()
       return;
 
    DailyTargetReached=true;
+   if(GVDailyLock!="")
+      GlobalVariableSet(GVDailyLock,1.0);
 
    DeleteRecoveryPending();
    CloseAllExposure();
@@ -1277,7 +1322,9 @@ int OnInit()
    SymbolTrade=_Symbol;
    OrdersID=(MagicNumber==0)?101010:MagicNumber;
    InitialBalance=AccountInfoDouble(ACCOUNT_BALANCE);
-   HighWaterMark=AccountInfoDouble(ACCOUNT_EQUITY);
+
+   InitPersistentState();
+   ResetDailyTargetIfNewDay();
 
    HandleRSI=iRSI(SymbolTrade,PERIOD_CURRENT,RSIPeriod,PRICE_CLOSE);
    HandleMA=iMA(SymbolTrade,PERIOD_CURRENT,MAPeriod,0,MODE_SMA,PRICE_CLOSE);
@@ -1292,7 +1339,6 @@ int OnInit()
    if(AccountInfoInteger(ACCOUNT_MARGIN_MODE)!=ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
       return INIT_FAILED;
 
-   ResetDailyTargetIfNewDay();
    UpdateStatus();
 
    if(IsNewsEngineAllowed())
@@ -1361,7 +1407,10 @@ void OnTick()
    double equity=AccountInfoDouble(ACCOUNT_EQUITY);
 
    if(equity>HighWaterMark)
+   {
       HighWaterMark=equity;
+      SaveHighWaterMark();
+   }
 
    double dd=
       (equity<HighWaterMark && HighWaterMark>0)?
