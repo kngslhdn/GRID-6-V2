@@ -78,7 +78,7 @@ input int    MaxRecoveryStages          = 1;
 input double RecoveryExitProfitUSD      = 2.0;
 
 //================ HOURS =================//
-input bool   UseTradingHour          = true;
+input bool   UseTradingHour          = false;
 input int    StartHour               = 7;
 input int    EndHour                 = 22;
 
