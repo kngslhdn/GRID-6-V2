@@ -126,6 +126,10 @@ bool BasketTrailingActive=false;
 bool IsTerminated=false;
 double InitialBalance=0;
 double HighWaterMark=0;
+string GVPrefix="";
+string GVHWM="";
+string GVDailyLock="";
+string GVDailyKey="";
 
 //================ NEWS STATE =================//
 bool NewsBlockActive=false;
