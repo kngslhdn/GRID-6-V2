@@ -690,6 +690,11 @@ void UpdateStatus()
    RecoveryActive=RecoveryStage>0;
 
    BasketProfitValue=BuyProfit+SellProfit+RecoveryProfit;
+
+   // A safety lock belongs to the current basket only. Once the basket is flat,
+   // allow recovery logic to operate normally on the next basket.
+   if(BuyOrders==0 && SellOrders==0 && RecoveryStage==0)
+      RecoverySafetyLocked=false;
 }
 
 bool HasRecoveryPending()
