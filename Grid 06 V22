@@ -120,8 +120,8 @@ datetime LastBuyTime=0,LastSellTime=0;
 int RecoveryStage=0;
 double Recovery1Lots=0,Recovery1Profit=0,Recovery1EntryPrice=0;
 double Recovery2Lots=0,Recovery2Profit=0,Recovery2EntryPrice=0;
-ENUM_POSITION_TYPE Recovery1Type=WRONG_VALUE;
-ENUM_POSITION_TYPE Recovery2Type=WRONG_VALUE;
+ENUM_POSITION_TYPE Recovery1Type=POSITION_TYPE_BUY;
+ENUM_POSITION_TYPE Recovery2Type=POSITION_TYPE_BUY;
 
 double RecoveryLots=0,RecoveryProfit=0;
 bool RecoveryActive=false;
