@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
-//| GRID 06.V22 - V12 PERFORMANCE + V22 SAFETY EDITION             |
-//| V12 Two-Stage Recovery + V22 Risk/Safety/News Engine          |
+//| GRID 06.V22 - V21 FINDINGS + CONTROLLED RECOVERY EDITION     |
+//| V21 benchmark findings applied: DD, holding time, session risk |
 //| XAUUSD / MT5 / Hedging Account                                   |
 //+------------------------------------------------------------------+
 #property strict
-#property version "22.00"
+#property version "22.10"
 
 #include <Trade/Trade.mqh>
 CTrade trade;
@@ -24,10 +24,10 @@ input double TrailingStopUSD         = 3.0;
 
 //================ DAILY TARGET =================//
 input bool   EnableDailyTarget       = true;
-input double DailyTargetProfitUSD    = 50.0;
+input double DailyTargetProfitUSD    = 100.0;
 
 //================ RISK =================//
-input double MaxEquityLossPercent    = 40.0;
+input double MaxEquityLossPercent    = 30.0;
 
 //================ PRIMARY =================//
 input int    MAPeriod                = 200;
@@ -48,7 +48,7 @@ input double ManualLotSize           = 0.01;
 input int    MaxOrders               = 3;
 
 //================ EXECUTION SAFETY =================//
-input double MaxTotalLots             = 3.0;
+input double MaxTotalLots             = 1.0;
 input double MinimumFreeMarginPercent = 70.0;
 input double MaxSpreadPoints          = 500.0;
 input int    EntryCooldownSeconds     = 30;
@@ -59,31 +59,31 @@ input int    EntryCooldownSeconds     = 30;
 input bool   EnableRecovery             = true;
 
 // Stage 1
-input double Recovery1Multiplier        = 10.0;
-input double Recovery1GapPoints         = 10000.0;
-input double Recovery1MaxLot            = 2.0;
+input double Recovery1Multiplier        = 2.0;
+input double Recovery1GapPoints         = 2000.0;
+input double Recovery1MaxLot            = 0.50;
 
 // Stage 2
-input bool   AllowRecoveryStage2        = true;
-input double Recovery2Multiplier        = 30.0;
+input bool   AllowRecoveryStage2        = false;
+input double Recovery2Multiplier        = 3.0;
 input double Recovery2GapPoints         = 6250.0;
-input double Recovery2MaxLot            = 2.0;
+input double Recovery2MaxLot            = 0.75;
 
 // Hard caps
-input double RecoveryMaxHedgeMultiplier = 30.0;
+input double RecoveryMaxHedgeMultiplier = 2.0;
 
 // Recovery behavior
 input bool   RecoveryOnlyWhenMinus      = true;
-input int    MaxRecoveryStages          = 2;
+input int    MaxRecoveryStages          = 1;
 input double RecoveryExitProfitUSD      = 2.0;
 
-// $2,500 Recovery Profile: defensive DD threshold before hard 40% stop.
-input double DefensiveEquityLossPercent = 20.0;
+// $2,500 V22.10 profile derived from V21 Test 2 findings: lower DD tolerance,\n// shorter/smaller recovery exposure, and session blocking to reduce long holds.
+input double DefensiveEquityLossPercent = 15.0;
 
 // Recovery stage loss caps. These protect against a single recovery
 // position becoming the dominant source of account drawdown.
-input double Recovery1MaxLossUSD          = 250.0;
-input double Recovery2MaxLossUSD          = 500.0;
+input double Recovery1MaxLossUSD          = 150.0;
+input double Recovery2MaxLossUSD          = 300.0;
 
 //================ HOURS =================//
 input bool   UseTradingHour          = true;
@@ -1524,7 +1524,9 @@ void OnTick()
 
    if(UseTradingHour && !IsTradingHour())
    {
-      CloseAllExposure();
+      // V21 Test 2 showed materially longer holding times.  Do not force-close
+      // an existing basket at session end; simply block new recovery/grid work
+      // until the next allowed trading session.
       DisplayDashboard(CurrentDrawdownPercent);
       return;
    }
