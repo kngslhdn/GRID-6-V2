@@ -120,8 +120,8 @@ datetime LastBuyTime=0,LastSellTime=0;
 int RecoveryStage=0;
 double Recovery1Lots=0,Recovery1Profit=0,Recovery1EntryPrice=0;
 double Recovery2Lots=0,Recovery2Profit=0,Recovery2EntryPrice=0;
-ENUM_POSITION_TYPE Recovery1Type=POSITION_TYPE_BUY;
-ENUM_POSITION_TYPE Recovery2Type=POSITION_TYPE_BUY;
+int Recovery1Type=-1;
+int Recovery2Type=-1;
 
 double RecoveryLots=0,RecoveryProfit=0;
 bool RecoveryActive=false;
@@ -609,8 +609,8 @@ void UpdateStatus()
    RecoveryStage=0;
    Recovery1Lots=Recovery1Profit=Recovery1EntryPrice=0;
    Recovery2Lots=Recovery2Profit=Recovery2EntryPrice=0;
-   Recovery1Type=WRONG_VALUE;
-   Recovery2Type=WRONG_VALUE;
+   Recovery1Type=-1;
+   Recovery2Type=-1;
 
    for(int i=PositionsTotal()-1;i>=0;i--)
    {
@@ -644,7 +644,7 @@ void UpdateStatus()
          Recovery1Lots+=lot;
          Recovery1Profit+=profit;
          Recovery1EntryPrice=openPrice;
-         Recovery1Type=type;
+         Recovery1Type=(int)type;
          RecoveryStage=MathMax(RecoveryStage,1);
          continue;
       }
@@ -654,7 +654,7 @@ void UpdateStatus()
          Recovery2Lots+=lot;
          Recovery2Profit+=profit;
          Recovery2EntryPrice=openPrice;
-         Recovery2Type=type;
+         Recovery2Type=(int)type;
          RecoveryStage=MathMax(RecoveryStage,2);
          continue;
       }
@@ -837,9 +837,9 @@ void ManageRecoveryStage2()
       return;
 
    double adverseMove=0;
-   if(Recovery1Type==POSITION_TYPE_BUY)
+   if(Recovery1Type==(int)POSITION_TYPE_BUY)
       adverseMove=(Recovery1EntryPrice-bid)/point;
-   else if(Recovery1Type==POSITION_TYPE_SELL)
+   else if(Recovery1Type==(int)POSITION_TYPE_SELL)
       adverseMove=(ask-Recovery1EntryPrice)/point;
    else
       return;
