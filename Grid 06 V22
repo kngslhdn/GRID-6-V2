@@ -1347,29 +1347,81 @@ int OnInit()
    OrdersID=(MagicNumber==0)?101010:MagicNumber;
    InitialBalance=AccountInfoDouble(ACCOUNT_BALANCE);
 
+   Print("========================================");
+   Print("V22 INITIALIZATION START");
+   PrintFormat("Symbol=%s",SymbolTrade);
+   PrintFormat("Balance=%.2f",InitialBalance);
+   PrintFormat("Equity=%.2f",AccountInfoDouble(ACCOUNT_EQUITY));
+   PrintFormat("MarginMode=%d",
+               AccountInfoInteger(ACCOUNT_MARGIN_MODE));
+   PrintFormat("Tester=%s",
+               MQLInfoInteger(MQL_TESTER)?"YES":"NO");
+
    InitPersistentState();
    ResetDailyTargetIfNewDay();
 
-   HandleRSI=iRSI(SymbolTrade,PERIOD_CURRENT,RSIPeriod,PRICE_CLOSE);
-   HandleMA=iMA(SymbolTrade,PERIOD_CURRENT,MAPeriod,0,MODE_SMA,PRICE_CLOSE);
+   HandleRSI=iRSI(SymbolTrade,
+                  PERIOD_CURRENT,
+                  RSIPeriod,
+                  PRICE_CLOSE);
+
+   HandleMA=iMA(SymbolTrade,
+                PERIOD_CURRENT,
+                MAPeriod,
+                0,
+                MODE_SMA,
+                PRICE_CLOSE);
+
+   PrintFormat("RSI Handle=%d",HandleRSI);
+   PrintFormat("MA Handle=%d",HandleMA);
 
    trade.SetExpertMagicNumber(OrdersID);
    trade.SetDeviationInPoints(10);
    trade.SetTypeFillingBySymbol(SymbolTrade);
 
-   if(HandleRSI==INVALID_HANDLE || HandleMA==INVALID_HANDLE)
+   if(HandleRSI==INVALID_HANDLE)
+   {
+      PrintFormat("V22 INIT FAILED: RSI handle invalid. Error=%d",
+                  GetLastError());
       return INIT_FAILED;
+   }
 
-   if(AccountInfoInteger(ACCOUNT_MARGIN_MODE)!=ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
+   if(HandleMA==INVALID_HANDLE)
+   {
+      PrintFormat("V22 INIT FAILED: MA handle invalid. Error=%d",
+                  GetLastError());
       return INIT_FAILED;
+   }
+
+   ENUM_ACCOUNT_MARGIN_MODE marginMode=
+      (ENUM_ACCOUNT_MARGIN_MODE)
+      AccountInfoInteger(ACCOUNT_MARGIN_MODE);
+
+   if(marginMode!=ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
+   {
+      PrintFormat(
+         "V22 INIT FAILED: HEDGING ACCOUNT REQUIRED | mode=%d",
+         marginMode
+      );
+
+      return INIT_FAILED;
+   }
 
    UpdateStatus();
 
    if(IsNewsEngineAllowed())
    {
-      EventSetTimer(MathMax(1,NewsRefreshSeconds));
+      if(!EventSetTimer(MathMax(1,NewsRefreshSeconds)))
+      {
+         PrintFormat("V22 WARNING: EventSetTimer failed. Error=%d",
+                     GetLastError());
+      }
+
       UpdateNewsStatus();
    }
+
+   Print("V22 INITIALIZATION SUCCESS");
+   Print("========================================");
 
    return INIT_SUCCEEDED;
 }
