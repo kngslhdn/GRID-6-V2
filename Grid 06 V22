@@ -144,12 +144,23 @@ string GVDailyKey="";
 
 void InitPersistentState()
 {
-   GVPrefix=StringFormat("GRID06V22_%s_%d",SymbolTrade,OrdersID);
+   if(MQLInfoInteger(MQL_TESTER))
+      GVPrefix=StringFormat("GRID06V22_TEST_%s_%d",SymbolTrade,OrdersID);
+   else
+      GVPrefix=StringFormat("GRID06V22_%s_%d",SymbolTrade,OrdersID);
    GVHWM=GVPrefix+"_HWM";
    GVDailyLock=GVPrefix+"_DAILY_LOCK";
    GVDailyKey=GVPrefix+"_DAILY_KEY";
 
    double equity=AccountInfoDouble(ACCOUNT_EQUITY);
+
+   if(MQLInfoInteger(MQL_TESTER))
+   {
+      // Tester runs must start from the current test equity, not a prior
+      // terminal global-variable HWM from another run.
+      HighWaterMark=equity;
+      return;
+   }
 
    if(GlobalVariableCheck(GVHWM))
       HighWaterMark=MathMax(GlobalVariableGet(GVHWM),equity);
@@ -164,7 +175,7 @@ void InitPersistentState()
 
 void SaveHighWaterMark()
 {
-   if(GVHWM!="" && HighWaterMark>0)
+   if(GVHWM!="" && HighWaterMark>0 && !MQLInfoInteger(MQL_TESTER))
       GlobalVariableSet(GVHWM,HighWaterMark);
 }
 
@@ -223,7 +234,9 @@ void ResetDailyTargetIfNewDay()
    TimeToStruct(GetStrategyTime(),dt);
 
    int key=GetServerDayKey();
-   double storedKey=GlobalVariableCheck(GVDailyKey)?GlobalVariableGet(GVDailyKey):-1;
+   double storedKey=-1.0;
+   if(!MQLInfoInteger(MQL_TESTER) && GlobalVariableCheck(GVDailyKey))
+      storedKey=GlobalVariableGet(GVDailyKey);
 
    if(DailyTargetYear==dt.year &&
       DailyTargetDayOfYear==dt.day_of_year &&
@@ -237,12 +250,15 @@ void ResetDailyTargetIfNewDay()
    if(storedKey!=(double)key)
    {
       DailyTargetReached=false;
-      if(GVDailyKey!="") GlobalVariableSet(GVDailyKey,(double)key);
-      if(GVDailyLock!="") GlobalVariableSet(GVDailyLock,0.0);
+      if(GVDailyKey!="" && !MQLInfoInteger(MQL_TESTER))
+         GlobalVariableSet(GVDailyKey,(double)key);
+      if(GVDailyLock!="" && !MQLInfoInteger(MQL_TESTER))
+         GlobalVariableSet(GVDailyLock,0.0);
    }
    else
    {
       DailyTargetReached=
+         !MQLInfoInteger(MQL_TESTER) &&
          GVDailyLock!="" &&
          GlobalVariableCheck(GVDailyLock) &&
          GlobalVariableGet(GVDailyLock)>0.5;
@@ -1125,6 +1141,8 @@ void ManageBasketExit()
 
    if(UseTrailingProfit)
    {
+      // In trailing mode, TrailingStartUSD/TrailingStopUSD govern the exit.
+      // TargetProfitUSD is used when UseTrailingProfit=false.
       double arm=TrailingStartUSD;
 
       if(!BasketTrailingActive &&
@@ -1201,7 +1219,7 @@ void LockDailyTarget()
       return;
 
    DailyTargetReached=true;
-   if(GVDailyLock!="")
+   if(GVDailyLock!="" && !MQLInfoInteger(MQL_TESTER))
       GlobalVariableSet(GVDailyLock,1.0);
 
    DeleteRecoveryPending();
@@ -1522,19 +1540,21 @@ void OnTick()
       return;
    }
 
-   if(UseTradingHour && !IsTradingHour())
-   {
-      // V21 Test 2 showed materially longer holding times.  Do not force-close
-      // an existing basket at session end; simply block new recovery/grid work
-      // until the next allowed trading session.
-      DisplayDashboard(CurrentDrawdownPercent);
-      return;
-   }
-
+   // Pre-news close is a safety action and is evaluated before
+   // trading-hours gating so it can operate 24H when enabled.
    if(IsNewsEngineAllowed() && NewsCloseWindow)
    {
       DeleteRecoveryPending();
       CloseAllExposure();
+      DisplayDashboard(CurrentDrawdownPercent);
+      return;
+   }
+
+   if(UseTradingHour && !IsTradingHour())
+   {
+      // V21 Test 2 showed materially longer holding times. Do not force-close
+      // an existing basket at session end; simply block new recovery/grid work
+      // until the next allowed trading session.
       DisplayDashboard(CurrentDrawdownPercent);
       return;
    }
