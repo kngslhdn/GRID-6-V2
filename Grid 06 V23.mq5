@@ -38,6 +38,25 @@ input bool   UseTradingHour       = true;
 input int    StartHour            = 7;
 input int    EndHour              = 22;
 
+
+//========================================================
+// NEWS FILTER SETTINGS
+// Uses MT5 Economic Calendar.
+// Calendar timestamps use trade-server time.
+//========================================================
+input string NewsFilterSettings     = "||========== NEWS FILTER ==========||";
+input bool   EnableNewsFilter       = true;
+input string NewsCurrency           = "USD";
+input bool   NewsHighImpactOnly     = true;
+input int    NewsBeforeMinutes      = 30;
+input int    NewsAfterMinutes       = 30;
+input bool   CloseBeforeNews        = false;
+input int    CloseBeforeNewsMinutes = 5;
+input bool   BlockNewEntries        = true;
+input bool   BlockGridExpansion     = true;
+input bool   BlockRecovery          = true;
+input int    NewsRefreshSeconds     = 10;
+
 //--- Global Variables ---
 string SymbolTrade;
 int    OrdersID, HandleRSI, HandleMA;
@@ -47,6 +66,15 @@ double PriceOpenLastBuy, PriceOpenLastSell;
 
 bool   IsTerminated = false;
 double HighWaterMark = 0;
+
+//========================================================
+// NEWS FILTER STATE
+//========================================================
+bool     NewsBlocked          = false;
+bool     NewsDataAvailable    = false;
+datetime LastNewsCheckTime    = 0;
+datetime LastNewsEventTime    = 0;
+string   LastNewsEventName    = "";
 
 //========================================================
 // ADAPTIVE EQUITY VARIABLES
@@ -163,6 +191,9 @@ void OnTick()
       return;
 
    UpdateStatus();
+
+   // Refresh MT5 Economic Calendar state before evaluating entries.
+   bool newsBlockedNow = IsNewsBlocked();
 
    //========================================================
    // ADAPTIVE EQUITY SCALING
@@ -292,9 +323,16 @@ void OnTick()
       }
    }
 
-   // Optional pre-news liquidation is intentionally OFF by default.
-   if(newsBlockedNow && CloseBeforeNews)
+   // Optional pre-news liquidation.
+   // Only close inside the dedicated pre-news window, not for the
+   // entire news block window.
+   if(IsPreNewsCloseWindow())
+   {
+      PrintFormat("PRE-NEWS CLOSE | event=%s | event_time=%s",
+                  LastNewsEventName,
+                  TimeToString(LastNewsEventTime, TIME_DATE|TIME_MINUTES));
       CloseAllOrders();
+   }
 
    //========================================================
    // EXECUTION
@@ -414,9 +452,18 @@ bool IsNewsBlocked()
       if(eventTime < fromTime || eventTime > toTime)
          continue;
 
-      NewsBlocked       = true;
-      LastNewsEventTime = eventTime;
-      LastNewsEventName = event.name;
+      NewsBlocked = true;
+
+      // Keep the nearest future matching event for the optional
+      // pre-news close window. If there is no future event, retain
+      // the first matching event for dashboard/diagnostics.
+      if(LastNewsEventTime == 0 ||
+         (eventTime > now && LastNewsEventTime <= now) ||
+         (eventTime > now && eventTime < LastNewsEventTime))
+      {
+         LastNewsEventTime = eventTime;
+         LastNewsEventName = event.name;
+      }
 
       PrintFormat(
          "NEWS BLOCK | %s | %s | event=%s | event_time=%s | window=%d/%d min",
@@ -427,8 +474,6 @@ bool IsNewsBlocked()
          beforeMinutes,
          afterMinutes
       );
-
-      break;
    }
 
    return NewsBlocked;
