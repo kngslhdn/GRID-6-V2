@@ -129,8 +129,8 @@ double BuyProfit = 0.0;
 double SellProfit = 0.0;
 double Buy3Price = 0.0;
 double Sell3Price = 0.0;
-datetime LastBuyTime = 0;
-datetime LastSellTime = 0;
+long LastBuyTimeMsc = 0;
+long LastSellTimeMsc = 0;
 
 double Recovery1Lots = 0.0;
 double Recovery1Profit = 0.0;
@@ -918,8 +918,8 @@ void UpdateStatus()
 
    Buy3Price = 0;
    Sell3Price = 0;
-   LastBuyTime = 0;
-   LastSellTime = 0;
+   LastBuyTimeMsc = 0;
+   LastSellTimeMsc = 0;
 
    RecoveryStage = 0;
 
@@ -999,9 +999,9 @@ void UpdateStatus()
          BuyLots += lot;
          BuyProfit += p;
 
-         if(timeMsc >= LastBuyTime)
+         if(timeMsc >= LastBuyTimeMsc)
          {
-            LastBuyTime = (datetime)timeMsc;
+            LastBuyTimeMsc = timeMsc;
             PriceOpenLastBuy = open;
          }
 
@@ -1014,9 +1014,9 @@ void UpdateStatus()
          SellLots += lot;
          SellProfit += p;
 
-         if(timeMsc >= LastSellTime)
+         if(timeMsc >= LastSellTimeMsc)
          {
-            LastSellTime = (datetime)timeMsc;
+            LastSellTimeMsc = timeMsc;
             PriceOpenLastSell = open;
          }
 
