@@ -19,8 +19,8 @@ input double TrailingStopUSD      = 2.0;
 input string RSI_Settings         = "||========== INDICATORS ==========||";
 input int    MAPeriod             = 200;
 input int    RSIPeriod            = 14;
-input int    RSIUpper             = 61;
-input int    RSILower             = 41;
+input int    RSIUpper             = 64;
+input int    RSILower             = 37;
 
 input string Grid_Settings        = "||========== GRID LOGIC ==========||";
 input Type   TypeOrdersPlace      = Open_Buy_And_Sell;
