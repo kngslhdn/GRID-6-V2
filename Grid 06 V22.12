@@ -1452,11 +1452,8 @@ int OnInit()
    trade.SetExpertMagicNumber(OrdersID);
    trade.SetDeviationInPoints(10);
 
-   if(!trade.SetTypeFillingBySymbol(SymbolTrade))
-   {
-      PrintFormat("V22.12 WARNING: SetTypeFillingBySymbol failed for %s. Error=%d",
-                  SymbolTrade,GetLastError());
-   }
+   ResetLastError();
+   trade.SetTypeFillingBySymbol(SymbolTrade);
 
    UpdateStatus();
 
