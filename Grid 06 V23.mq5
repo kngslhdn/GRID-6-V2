@@ -234,7 +234,13 @@ void OnTick()
    // DO NOT CHANGE
    //========================================================
 
+   bool allowNewEntries = !(newsBlockedNow && BlockNewEntries);
+   bool allowGridExpansion = !(newsBlockedNow && BlockGridExpansion);
+   bool allowRecoveryEntries = !(newsBlockedNow && BlockRecovery && IsInRecovery);
+
    if(BuyOrders == 0 &&
+      allowNewEntries &&
+      allowRecoveryEntries &&
       (TypeOrdersPlace == Open_Buy_And_Sell
       || TypeOrdersPlace == Open__Only_Buy))
    {
@@ -243,6 +249,8 @@ void OnTick()
    }
 
    if(SellOrders == 0 &&
+      allowNewEntries &&
+      allowRecoveryEntries &&
       (TypeOrdersPlace == Open_Buy_And_Sell
       || TypeOrdersPlace == Open__Only_Sell))
    {
@@ -255,7 +263,9 @@ void OnTick()
    // DO NOT CHANGE
    //========================================================
 
-   if(BuyOrders > 0 && BuyOrders < MaxOrders)
+   if(BuyOrders > 0 && BuyOrders < MaxOrders &&
+      allowGridExpansion &&
+      allowRecoveryEntries)
    {
       double gap =
          PointsForFirstGap
@@ -268,7 +278,9 @@ void OnTick()
       }
    }
 
-   if(SellOrders > 0 && SellOrders < MaxOrders)
+   if(SellOrders > 0 && SellOrders < MaxOrders &&
+      allowGridExpansion &&
+      allowRecoveryEntries)
    {
       double gap =
          PointsForFirstGap
@@ -279,6 +291,10 @@ void OnTick()
          canOpenSell = true;
       }
    }
+
+   // Optional pre-news liquidation is intentionally OFF by default.
+   if(newsBlockedNow && CloseBeforeNews)
+      CloseAllOrders();
 
    //========================================================
    // EXECUTION
@@ -298,6 +314,142 @@ void OnTick()
    DisplayDashboard(currentDrawdown, rsi, IsInRecovery);
 }
 
+
+//================================================================================================//
+// NEWS FILTER ENGINE
+// Uses MT5 Economic Calendar. Calendar times are trade-server times.
+//================================================================================================//
+bool IsNewsBlocked()
+{
+   if(!EnableNewsFilter)
+   {
+      NewsBlocked       = false;
+      NewsDataAvailable = false;
+      LastNewsEventTime = 0;
+      LastNewsEventName = "";
+      return false;
+   }
+
+   datetime now = TimeCurrent();
+
+   int refresh = MathMax(1, NewsRefreshSeconds);
+
+   if(LastNewsCheckTime != 0 &&
+      (now - LastNewsCheckTime) < refresh)
+   {
+      return NewsBlocked;
+   }
+
+   LastNewsCheckTime = now;
+   NewsBlocked       = false;
+   NewsDataAvailable = false;
+   LastNewsEventTime = 0;
+   LastNewsEventName = "";
+
+   string currency = NewsCurrency;
+   StringTrimLeft(currency);
+   StringTrimRight(currency);
+   StringToUpper(currency);
+
+   if(StringLen(currency) == 0)
+   {
+      Print("NEWS FILTER WARNING: NewsCurrency is empty. Filter is inactive.");
+      return false;
+   }
+
+   int beforeMinutes = MathMax(0, NewsBeforeMinutes);
+   int afterMinutes  = MathMax(0, NewsAfterMinutes);
+
+   datetime fromTime = now - (beforeMinutes * 60);
+   datetime toTime   = now + (afterMinutes * 60);
+
+   MqlCalendarValue values[];
+   ResetLastError();
+
+   int count = CalendarValueHistory(
+      values,
+      fromTime,
+      toTime,
+      NULL,
+      currency
+   );
+
+   if(count < 0)
+   {
+      int err = GetLastError();
+
+      // Fail-open: calendar availability must not terminate the EA.
+      // Journal makes the condition visible for live/test diagnostics.
+      PrintFormat(
+         "NEWS FILTER WARNING: CalendarValueHistory failed | currency=%s | error=%d",
+         currency,
+         err
+      );
+
+      return false;
+   }
+
+   NewsDataAvailable = true;
+
+   for(int i = 0; i < count; i++)
+   {
+      MqlCalendarEvent event;
+
+      if(!CalendarEventById(values[i].event_id, event))
+         continue;
+
+      bool importanceOK =
+         !NewsHighImpactOnly ||
+         event.importance == CALENDAR_IMPORTANCE_HIGH;
+
+      if(!importanceOK)
+         continue;
+
+      // Only events with an actual timestamp are actionable.
+      if(event.time_mode != CALENDAR_TIMEMODE_DATETIME)
+         continue;
+
+      datetime eventTime = values[i].time;
+
+      if(eventTime < fromTime || eventTime > toTime)
+         continue;
+
+      NewsBlocked       = true;
+      LastNewsEventTime = eventTime;
+      LastNewsEventName = event.name;
+
+      PrintFormat(
+         "NEWS BLOCK | %s | %s | event=%s | event_time=%s | window=%d/%d min",
+         currency,
+         EnumToString((ENUM_CALENDAR_EVENT_IMPORTANCE)event.importance),
+         event.name,
+         TimeToString(eventTime, TIME_DATE|TIME_MINUTES),
+         beforeMinutes,
+         afterMinutes
+      );
+
+      break;
+   }
+
+   return NewsBlocked;
+}
+
+//================================================================================================//
+bool IsPreNewsCloseWindow()
+{
+   if(!EnableNewsFilter || !CloseBeforeNews)
+      return false;
+
+   datetime now = TimeCurrent();
+
+   if(LastNewsEventTime <= 0)
+      return false;
+
+   return (LastNewsEventTime > now &&
+           (LastNewsEventTime - now) <= CloseBeforeNewsMinutes * 60);
+}
+
+//================================================================================================//
 //================================================================================================//
 void ManageExit(bool recovery)
 {
@@ -687,6 +839,8 @@ void DisplayDashboard(double dd, double rsi, bool recovery)
       "Equity HWM : ", DoubleToString(EquityHighWaterMark, 2), "\n",
       "Locked Profit : ", DoubleToString(LockedProfit, 2), "\n",
       "RSI (14) : ", DoubleToString(rsi, 2), "\n",
+      "News     : ", (EnableNewsFilter ? (NewsBlocked ? "BLOCKED" : "CLEAR") : "OFF"), "\n",
+      "News Event : ", (LastNewsEventName == "" ? "-" : LastNewsEventName), "\n",
       "----------------------------------\n",
       "Buy  Lapis: ", BuyOrders,
       " | Profit: ", DoubleToString(BuyProfits, 2), "\n",
