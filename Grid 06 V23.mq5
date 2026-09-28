@@ -1165,6 +1165,11 @@ bool ValidateTradeRequest(MqlTradeRequest &req, const string context)
    MqlTradeCheckResult check = {};
    ResetLastError();
 
+   // IMPORTANT:
+   // OrderCheck() has its own result-code convention.
+   // A successful pre-trade check normally returns retcode=0 with
+   // comment="Done". TRADE_RETCODE_DONE (10009) belongs to
+   // MqlTradeResult after OrderSend(), not to a successful OrderCheck().
    if(!OrderCheck(req, check))
    {
       PrintFormat("ORDER CHECK FAILED | %s | Error=%d | Retcode=%u | Comment=%s | MarginFree=%.2f",
@@ -1176,7 +1181,9 @@ bool ValidateTradeRequest(MqlTradeRequest &req, const string context)
       return false;
    }
 
-   if(check.retcode != TRADE_RETCODE_DONE)
+   // For OrderCheck(), retcode=0 means the request passed validation.
+   // Do NOT compare it to TRADE_RETCODE_DONE (10009).
+   if(check.retcode != 0)
    {
       PrintFormat("ORDER CHECK REJECTED | %s | Retcode=%u | Comment=%s | MarginFree=%.2f",
                   context,
