@@ -4,7 +4,7 @@
 //================================================================================================//
 #property strict
 #property copyright "Copyright 2026, Jarvis"
-#property version   "6.22"
+#property version   "6.23"
 
 //--- Enums ---
 enum Type {Open_Buy_And_Sell, Open__Only_Buy, Open__Only_Sell};
@@ -90,6 +90,7 @@ double HighWaterMark = 0;
 //========================================================
 bool     NewsBlocked          = false;
 bool     NewsDataAvailable    = false;
+bool     TesterNewsWarningShown = false;
 datetime LastNewsCheckTime    = 0;
 datetime LastNewsEventTime    = 0;
 string   LastNewsEventName    = "";
@@ -350,6 +351,29 @@ void OnTick()
 //================================================================================================//
 bool IsNewsBlocked()
 {
+   //========================================================
+   // STRATEGY TESTER SAFETY
+   // MT5 Economic Calendar functions are not available in
+   // the native Strategy Tester and return error 4014.
+   // Disable only the live calendar query during backtests.
+   // All trading, recovery and equity-protection logic remains active.
+   //========================================================
+   if(MQLInfoInteger(MQL_TESTER))
+   {
+      NewsBlocked       = false;
+      NewsDataAvailable = false;
+      LastNewsEventTime = 0;
+      LastNewsEventName = "";
+
+      if(!TesterNewsWarningShown)
+      {
+         Print("NEWS FILTER: disabled in Strategy Tester (Economic Calendar API is unavailable; error 4014 avoided).");
+         TesterNewsWarningShown = true;
+      }
+
+      return false;
+   }
+
    if(!EnableNewsFilter)
    {
       NewsBlocked       = false;
@@ -473,6 +497,9 @@ bool IsNewsBlocked()
 //================================================================================================//
 bool IsPreNewsCloseWindow()
 {
+   if(MQLInfoInteger(MQL_TESTER))
+      return false;
+
    if(!EnableNewsFilter || !CloseBeforeNews)
       return false;
 
