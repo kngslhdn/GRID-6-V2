@@ -1,10 +1,10 @@
 //================================================================================================//
 // Expert Advisor: GRID 06.V02 - RECOVERY & GROWTH EDITION 2026
-// Adaptive Equity Scaling Edition - V24 RISK-CONTROLLED RECOVERY ENGINE + SAFETY PATCH
+// Adaptive Equity Scaling Edition - V25 SELECTIVE RECOVERY + RECOVERY EXIT ENGINE + SAFETY PATCH
 //================================================================================================//
 #property strict
 #property copyright "Copyright 2026, Jarvis"
-#property version   "6.30"
+#property version   "6.40"
 
 //--- Enums ---
 enum Type {Open_Buy_And_Sell, Open__Only_Buy, Open__Only_Sell};
@@ -54,6 +54,12 @@ input double RecoveryRiskPercent    = 2.0;  // max equity risk per recovery leg
 input double MaxRecoveryBasketRiskPercent = 4.0; // max combined recovery risk
 input double MaxRecoveryBasketLots  = 0.0; // 0 = disabled; hard lot cap
 input double RecoveryBasketStopPercent = 6.0; // hard recovery basket-loss stop as % of current equity
+input double RecoveryMinBasketLossPercent = 0.75; // R1 requires meaningful basket loss
+input double RecoveryTakeProfitUSD        = 5.0;  // close recovery basket when this profit is reached
+input double RecoveryProfitRetraceUSD     = 2.0;  // recovery trailing giveback
+input double RecoveryMaxHoldMinutes       = 90.0; // 0 = disabled
+input bool   RecoveryRequireTrendConfirm  = true; // require price/MA confirmation before R1
+input double RecoveryMaxLotVsPrimary      = 2.0;  // recovery leg max lot relative to primary basket lots
 
 input int    MagicNumber          = 16082016;
 input string CommentsOrders       = "GRID 3 Buy Sell";
@@ -155,6 +161,9 @@ double RecoveryLots = 0.0;
 double RecoveryProfit = 0.0;
 double RecoveryRiskUSD = 0.0;
 bool   RecoveryActive = false;
+datetime RecoveryStartedTime = 0;
+double RecoveryPeakProfit = 0.0;
+bool   RecoveryTrailingActive = false;
 
 double BasketProfitValue = 0.0;
 double BasketPeakProfit = 0.0;
@@ -316,6 +325,19 @@ void OnTick()
    // V12 behavior: once recovery is active, the primary grid is frozen.
    if(RecoveryActive)
    {
+      ManageRecoveryExit();
+
+      UpdateStatus();
+
+      // Exit logic may have closed the basket.
+      if(!RecoveryActive)
+      {
+         DisplayDashboard(currentDrawdown,
+                          GetRSIValue(),
+                          false);
+         return;
+      }
+
       if(allowRecoveryEntries)
          ManageRecoveryStage2();
 
@@ -330,7 +352,8 @@ void OnTick()
    // and price has moved Recovery1GapPoints beyond primary order #3.
    if(allowRecoveryEntries &&
       BuyOrders >= MaxOrders &&
-      SellOrders == 0)
+      SellOrders == 0 &&
+      RecoveryTriggerAllowed(POSITION_TYPE_BUY))
    {
       ManageRecoveryStage1(POSITION_TYPE_BUY);
       UpdateStatus();
@@ -342,7 +365,8 @@ void OnTick()
 
    if(allowRecoveryEntries &&
       SellOrders >= MaxOrders &&
-      BuyOrders == 0)
+      BuyOrders == 0 &&
+      RecoveryTriggerAllowed(POSITION_TYPE_SELL))
    {
       ManageRecoveryStage1(POSITION_TYPE_SELL);
       UpdateStatus();
@@ -753,6 +777,117 @@ double RecoveryRiskBudgetUSD()
 }
 
 //================================================================================================//
+bool RecoveryTriggerAllowed(ENUM_POSITION_TYPE primaryType)
+{
+   if(!EnableRecovery || MaxRecoveryStages < 1)
+      return false;
+
+   if(RecoveryOnlyWhenMinus && BasketProfitValue >= 0.0)
+      return false;
+
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   if(equity <= 0.0)
+      return false;
+
+   double minLoss = equity * MathMax(0.0, RecoveryMinBasketLossPercent) / 100.0;
+   if(RecoveryMinBasketLossPercent > 0.0 && BasketProfitValue > -minLoss)
+      return false;
+
+   if(!RecoveryRequireTrendConfirm)
+      return true;
+
+   double ma = GetMAValue();
+   double price = SymbolInfoDouble(SymbolTrade, SYMBOL_BID);
+
+   if(ma <= 0.0 || price <= 0.0)
+      return false;
+
+   // Recovery is allowed only when the adverse move is still
+   // aligned with the primary basket direction.
+   if(primaryType == POSITION_TYPE_BUY)
+      return (price < ma);
+   if(primaryType == POSITION_TYPE_SELL)
+      return (price > ma);
+
+   return false;
+}
+
+//================================================================================================//
+void ManageRecoveryExit()
+{
+   if(!RecoveryActive)
+      return;
+
+   UpdateStatus();
+
+   double p = BasketProfitValue;
+   datetime now = TimeCurrent();
+
+   if(RecoveryStartedTime <= 0)
+      RecoveryStartedTime = now;
+
+   // Absolute recovery take-profit.
+   if(RecoveryTakeProfitUSD > 0.0 && p >= RecoveryTakeProfitUSD)
+   {
+      PrintFormat("RECOVERY TAKE PROFIT | P/L=%.2f | target=%.2f | stage=%d",
+                  p, RecoveryTakeProfitUSD, RecoveryStage);
+
+      if(CloseAllOrders())
+      {
+         RecoveryPeakProfit = 0.0;
+         RecoveryTrailingActive = false;
+         RecoveryStartedTime = 0;
+      }
+      return;
+   }
+
+   // Once recovery gets into profit, protect it with a smaller giveback.
+   if(p > 0.0)
+   {
+      if(!RecoveryTrailingActive)
+      {
+         RecoveryTrailingActive = true;
+         RecoveryPeakProfit = p;
+      }
+
+      if(p > RecoveryPeakProfit)
+         RecoveryPeakProfit = p;
+
+      if(RecoveryProfitRetraceUSD > 0.0 &&
+         p <= RecoveryPeakProfit - RecoveryProfitRetraceUSD)
+      {
+         PrintFormat("RECOVERY PROFIT RETRACE CLOSE | peak=%.2f | current=%.2f | stage=%d",
+                     RecoveryPeakProfit, p, RecoveryStage);
+
+         if(CloseAllOrders())
+         {
+            RecoveryPeakProfit = 0.0;
+            RecoveryTrailingActive = false;
+            RecoveryStartedTime = 0;
+         }
+         return;
+      }
+   }
+
+   // Time stop prevents R1/R2 from becoming a permanent hedge.
+   if(RecoveryMaxHoldMinutes > 0.0 &&
+      (now - RecoveryStartedTime) >= (int)(RecoveryMaxHoldMinutes * 60.0))
+   {
+      PrintFormat("RECOVERY TIME STOP | held=%.1f min | basket=%.2f | stage=%d",
+                  (now - RecoveryStartedTime) / 60.0,
+                  p,
+                  RecoveryStage);
+
+      if(CloseAllOrders())
+      {
+         RecoveryPeakProfit = 0.0;
+         RecoveryTrailingActive = false;
+         RecoveryStartedTime = 0;
+      }
+   }
+}
+
+//================================================================================================//
 void ManageRecoveryStage1(ENUM_POSITION_TYPE primaryType)
 {
    if(!EnableRecovery || RecoveryStage > 0 || HasRecoveryPending())
@@ -828,6 +963,9 @@ void ManageRecoveryStage1(ENUM_POSITION_TYPE primaryType)
 
    if(Recovery1MaxLot > 0.0)
       lot = NormalizeTradeVolume(MathMin(lot, Recovery1MaxLot));
+
+   if(RecoveryMaxLotVsPrimary > 0.0)
+      lot = NormalizeTradeVolume(MathMin(lot, primaryLots * RecoveryMaxLotVsPrimary));
 
    if(MaxRecoveryBasketLots > 0.0)
    {
@@ -930,6 +1068,9 @@ void ManageRecoveryStage2()
    if(Recovery2MaxLot > 0.0)
       lot = NormalizeTradeVolume(MathMin(lot, Recovery2MaxLot));
 
+   if(RecoveryMaxLotVsPrimary > 0.0)
+      lot = NormalizeTradeVolume(MathMin(lot, primaryLots * RecoveryMaxLotVsPrimary));
+
    if(MaxRecoveryBasketLots > 0.0)
    {
       double remaining = MaxRecoveryBasketLots - RecoveryLots;
@@ -995,6 +1136,10 @@ void ExecuteRecoveryTrade(ENUM_ORDER_TYPE type, double lot, int stage)
                   res.comment);
       return;
    }
+
+   RecoveryStartedTime = TimeCurrent();
+   RecoveryPeakProfit = 0.0;
+   RecoveryTrailingActive = false;
 
    PrintFormat("RECOVERY %d OPEN OK | Type=%s | Lot=%.2f | Order=%I64u | Deal=%I64u",
                stage,
@@ -1248,6 +1393,13 @@ void UpdateStatus()
 
    RecoveryActive =
       (RecoveryStage > 0);
+
+   if(!RecoveryActive)
+   {
+      RecoveryStartedTime = 0;
+      RecoveryPeakProfit = 0.0;
+      RecoveryTrailingActive = false;
+   }
 
    BasketProfitValue =
       BuyProfit
@@ -1524,6 +1676,8 @@ void DisplayDashboard(double dd, double rsi, bool recovery)
       "Recovery Risk: ", DoubleToString(RecoveryRiskUSD, 2),
       " / ", DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY) * MaxRecoveryBasketRiskPercent / 100.0, 2), " USD\n",
       "Recovery Stop: ", DoubleToString(RecoveryBasketStopPercent, 2), "% equity\n",
+      "Recovery TP: ", DoubleToString(RecoveryTakeProfitUSD, 2),
+      " | Hold: ", DoubleToString(RecoveryMaxHoldMinutes, 0), "m\n",
       "R1: ", DoubleToString(Recovery1Multiplier, 2),
       "x / ", DoubleToString(Recovery1GapPoints, 0), " pts",
       " | R2: ", DoubleToString(Recovery2Multiplier, 2),
