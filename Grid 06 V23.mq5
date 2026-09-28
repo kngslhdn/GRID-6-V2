@@ -1,10 +1,10 @@
 //================================================================================================//
 // Expert Advisor: GRID 06.V02 - RECOVERY & GROWTH EDITION 2026
-// Adaptive Equity Scaling Edition - V25 SELECTIVE RECOVERY + RECOVERY EXIT ENGINE + SAFETY PATCH
+// Adaptive Equity Scaling Edition - V25 TWO-STAGE RECOVERY + RISK-CONTROLLED EXIT ENGINE + SAFETY PATCH
 //================================================================================================//
 #property strict
 #property copyright "Copyright 2026, Jarvis"
-#property version   "6.40"
+#property version   "6.50"
 
 //--- Enums ---
 enum Type {Open_Buy_And_Sell, Open__Only_Buy, Open__Only_Sell};
@@ -38,10 +38,10 @@ input int    MaxOrders            = 3;
 //========================================================
 input string RecoverySettings       = "||========== TWO-STAGE RECOVERY ==========||";
 input bool   EnableRecovery         = true;
-input double Recovery1Multiplier    = 10.0;
+input double Recovery1Multiplier    = 1.5;
 input double Recovery1GapPoints     = 3000.0;
 input double Recovery1MaxLot        = 2.0;
-input double Recovery2Multiplier    = 30.0;
+input double Recovery2Multiplier    = 2.0;
 input double Recovery2GapPoints     = 1500.0;
 input double Recovery2MaxLot        = 2.0;
 input bool   RecoveryOnlyWhenMinus  = true;
@@ -50,16 +50,20 @@ input int    MaxRecoveryStages      = 2;
 // V24 RISK-CONTROLLED RECOVERY
 // Multiplier inputs remain for backward-compatible presets/diagnostics.
 // Actual recovery volume is capped by equity risk + basket exposure.
-input double RecoveryRiskPercent    = 2.0;  // max equity risk per recovery leg
-input double MaxRecoveryBasketRiskPercent = 4.0; // max combined recovery risk
+input double RecoveryRiskPercent    = 1.5;  // max equity risk per recovery leg
+input double MaxRecoveryBasketRiskPercent = 3.0; // max combined recovery risk
 input double MaxRecoveryBasketLots  = 0.0; // 0 = disabled; hard lot cap
 input double RecoveryBasketStopPercent = 6.0; // hard recovery basket-loss stop as % of current equity
 input double RecoveryMinBasketLossPercent = 0.75; // R1 requires meaningful basket loss
 input double RecoveryTakeProfitUSD        = 5.0;  // close recovery basket when this profit is reached
 input double RecoveryProfitRetraceUSD     = 2.0;  // recovery trailing giveback
-input double RecoveryMaxHoldMinutes       = 90.0; // 0 = disabled
+input double RecoveryMaxHoldMinutes       = 180.0; // 0 = disabled
 input bool   RecoveryRequireTrendConfirm  = true; // require price/MA confirmation before R1
 input double RecoveryMaxLotVsPrimary      = 2.0;  // recovery leg max lot relative to primary basket lots
+// V25 architecture:
+// Primary BUY  -> R1 SELL -> R2 SELL
+// Primary SELL -> R1 BUY  -> R2 BUY
+// Recovery is risk-capped and exits as one combined basket.
 
 input int    MagicNumber          = 16082016;
 input string CommentsOrders       = "GRID 3 Buy Sell";
@@ -975,9 +979,6 @@ void ManageRecoveryStage1(ENUM_POSITION_TYPE primaryType)
       lot = NormalizeTradeVolume(MathMin(lot, remaining));
    }
 
-   if(lot <= 0)
-      return;
-
    if(lot <= 0.0)
    {
       PrintFormat("RECOVERY 1 BLOCKED | risk budget %.2f USD produced no valid broker volume", riskBudget);
@@ -996,9 +997,10 @@ void ManageRecoveryStage2()
    if(Recovery1Lots <= 0 || Recovery1EntryPrice <= 0)
       return;
 
-   if(RecoveryOnlyWhenMinus && Recovery1Profit >= 0.0)
-      return;
-
+   // R2 is NOT blocked just because R1 is profitable.
+   // R1 is intentionally a hedge/recovery leg; when price continues
+   // in the original adverse direction, R1 should gain while the
+   // primary basket remains under pressure.
    if(RecoveryOnlyWhenMinus && BasketProfitValue >= 0.0)
       return;
 
@@ -1011,9 +1013,14 @@ void ManageRecoveryStage2()
 
    double adversePoints = 0.0;
 
-   if(Recovery1Type == POSITION_TYPE_BUY)
+   // R2 follows the SAME recovery direction as R1.
+   // Primary BUY -> R1 SELL -> R2 SELL
+   // Primary SELL -> R1 BUY -> R2 BUY
+   // Trigger when price moves another Recovery2GapPoints
+   // in the primary's adverse direction from the R1 entry.
+   if(Recovery1Type == POSITION_TYPE_SELL)
       adversePoints = (Recovery1EntryPrice - bid) / point;
-   else if(Recovery1Type == POSITION_TYPE_SELL)
+   else if(Recovery1Type == POSITION_TYPE_BUY)
       adversePoints = (ask - Recovery1EntryPrice) / point;
    else
       return;
@@ -1026,9 +1033,6 @@ void ManageRecoveryStage2()
    if(RecoveryStage != 1)
       return;
 
-   if(RecoveryOnlyWhenMinus && Recovery1Profit >= 0.0)
-      return;
-
    if(RecoveryOnlyWhenMinus && BasketProfitValue >= 0.0)
       return;
 
@@ -1039,8 +1043,8 @@ void ManageRecoveryStage2()
 
    ENUM_ORDER_TYPE recoveryType =
       (Recovery1Type == POSITION_TYPE_SELL)
-      ? ORDER_TYPE_BUY
-      : ORDER_TYPE_SELL;
+      ? ORDER_TYPE_SELL
+      : ORDER_TYPE_BUY;
 
    double entryPrice =
       (recoveryType == ORDER_TYPE_BUY)
@@ -1078,9 +1082,6 @@ void ManageRecoveryStage2()
          return;
       lot = NormalizeTradeVolume(MathMin(lot, remaining));
    }
-
-   if(lot <= 0)
-      return;
 
    if(lot <= 0.0)
    {
@@ -1369,7 +1370,7 @@ void UpdateStatus()
    // valued against its configured adverse distance.
    RecoveryRiskUSD = 0.0;
 
-   if(Recovery1Lots > 0.0 && Recovery1EntryPrice > 0.0 && Recovery1Type != WRONG_VALUE)
+   if(Recovery1Lots > 0.0 && Recovery1EntryPrice > 0.0 && (int)Recovery1Type != WRONG_VALUE)
    {
       ENUM_ORDER_TYPE r1Order =
          (Recovery1Type == POSITION_TYPE_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
@@ -1380,7 +1381,7 @@ void UpdateStatus()
       RecoveryRiskUSD += CalculateLossPerLot(r1Order, Recovery1EntryPrice, r1Stop) * Recovery1Lots;
    }
 
-   if(Recovery2Lots > 0.0 && Recovery2EntryPrice > 0.0 && Recovery2Type != WRONG_VALUE)
+   if(Recovery2Lots > 0.0 && Recovery2EntryPrice > 0.0 && (int)Recovery2Type != WRONG_VALUE)
    {
       ENUM_ORDER_TYPE r2Order =
          (Recovery2Type == POSITION_TYPE_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
