@@ -53,7 +53,7 @@ input int    MaxRecoveryStages      = 2;
 input double RecoveryRiskPercent    = 2.0;  // max equity risk per recovery leg
 input double MaxRecoveryBasketRiskPercent = 4.0; // max combined recovery risk
 input double MaxRecoveryBasketLots  = 0.0; // 0 = disabled; hard lot cap
-input double RecoveryBasketStopUSD   = 0.0; // 0 = disabled; hard basket-loss stop
+input double RecoveryBasketStopPercent = 6.0; // hard recovery basket-loss stop as % of current equity
 
 input int    MagicNumber          = 16082016;
 input string CommentsOrders       = "GRID 3 Buy Sell";
@@ -526,11 +526,15 @@ void ManageBasketExit()
 
    // V24 hard recovery basket-loss stop. This is checked before
    // profit trailing so a failed recovery cannot remain open indefinitely.
-   if(RecoveryActive && RecoveryBasketStopUSD > 0.0 &&
-      p <= -MathAbs(RecoveryBasketStopUSD))
+   double recoveryStopUSD =
+      AccountInfoDouble(ACCOUNT_EQUITY) *
+      MathMax(0.0, RecoveryBasketStopPercent) / 100.0;
+
+   if(RecoveryActive && recoveryStopUSD > 0.0 &&
+      p <= -recoveryStopUSD)
    {
-      PrintFormat("RECOVERY BASKET STOP | P/L=%.2f | limit=-%.2f | stage=%d",
-                  p, RecoveryBasketStopUSD, RecoveryStage);
+      PrintFormat("RECOVERY BASKET STOP | P/L=%.2f | limit=-%.2f (%.2f%% equity) | stage=%d",
+                  p, recoveryStopUSD, RecoveryBasketStopPercent, RecoveryStage);
 
       if(CloseAllOrders())
       {
@@ -1519,6 +1523,7 @@ void DisplayDashboard(double dd, double rsi, bool recovery)
       "Recovery Cap: ", (MaxRecoveryBasketLots > 0.0 ? DoubleToString(MaxRecoveryBasketLots, 2) : "OFF"), "\n",
       "Recovery Risk: ", DoubleToString(RecoveryRiskUSD, 2),
       " / ", DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY) * MaxRecoveryBasketRiskPercent / 100.0, 2), " USD\n",
+      "Recovery Stop: ", DoubleToString(RecoveryBasketStopPercent, 2), "% equity\n",
       "R1: ", DoubleToString(Recovery1Multiplier, 2),
       "x / ", DoubleToString(Recovery1GapPoints, 0), " pts",
       " | R2: ", DoubleToString(Recovery2Multiplier, 2),
