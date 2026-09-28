@@ -1,10 +1,10 @@
 //================================================================================================//
 // Expert Advisor: GRID 06.V02 - RECOVERY & GROWTH EDITION 2026
-// Adaptive Equity Scaling Edition - V23 FIXED ENGINE + V12 TWO-STAGE RECOVERY + SAFETY PATCH
+// Adaptive Equity Scaling Edition - V24 RISK-CONTROLLED RECOVERY ENGINE + SAFETY PATCH
 //================================================================================================//
 #property strict
 #property copyright "Copyright 2026, Jarvis"
-#property version   "6.25"
+#property version   "6.30"
 
 //--- Enums ---
 enum Type {Open_Buy_And_Sell, Open__Only_Buy, Open__Only_Sell};
@@ -46,7 +46,14 @@ input double Recovery2GapPoints     = 1500.0;
 input double Recovery2MaxLot        = 2.0;
 input bool   RecoveryOnlyWhenMinus  = true;
 input int    MaxRecoveryStages      = 2;
-input double MaxRecoveryBasketLots  = 0.0; // 0 = disabled; caps R1+R2 recovery exposure
+
+// V24 RISK-CONTROLLED RECOVERY
+// Multiplier inputs remain for backward-compatible presets/diagnostics.
+// Actual recovery volume is capped by equity risk + basket exposure.
+input double RecoveryRiskPercent    = 2.0;  // max equity risk per recovery leg
+input double MaxRecoveryBasketRiskPercent = 4.0; // max combined recovery risk
+input double MaxRecoveryBasketLots  = 0.0; // 0 = disabled; hard lot cap
+input double RecoveryBasketStopUSD   = 0.0; // 0 = disabled; hard basket-loss stop
 
 input int    MagicNumber          = 16082016;
 input string CommentsOrders       = "GRID 3 Buy Sell";
@@ -146,6 +153,7 @@ ENUM_POSITION_TYPE Recovery2Type = WRONG_VALUE;
 
 double RecoveryLots = 0.0;
 double RecoveryProfit = 0.0;
+double RecoveryRiskUSD = 0.0;
 bool   RecoveryActive = false;
 
 double BasketProfitValue = 0.0;
@@ -516,6 +524,22 @@ void ManageBasketExit()
 
    double p = BasketProfitValue;
 
+   // V24 hard recovery basket-loss stop. This is checked before
+   // profit trailing so a failed recovery cannot remain open indefinitely.
+   if(RecoveryActive && RecoveryBasketStopUSD > 0.0 &&
+      p <= -MathAbs(RecoveryBasketStopUSD))
+   {
+      PrintFormat("RECOVERY BASKET STOP | P/L=%.2f | limit=-%.2f | stage=%d",
+                  p, RecoveryBasketStopUSD, RecoveryStage);
+
+      if(CloseAllOrders())
+      {
+         BasketPeakProfit = 0;
+         BasketTrailingActive = false;
+      }
+      return;
+   }
+
    if(UseTrailingProfit)
    {
       double arm = MathMax(TargetProfitUSD, TrailingStartUSD);
@@ -680,6 +704,51 @@ void DeleteRecoveryPending()
 }
 
 //================================================================================================//
+double CalculateLossPerLot(ENUM_ORDER_TYPE orderType, double entryPrice, double stopPrice)
+{
+   double profit = 0.0;
+
+   if(entryPrice <= 0.0 || stopPrice <= 0.0)
+      return 0.0;
+
+   if(!OrderCalcProfit(orderType, SymbolTrade, 1.0, entryPrice, stopPrice, profit))
+      return 0.0;
+
+   return MathAbs(profit);
+}
+
+// Returns the maximum lot whose modeled loss to stopPrice is within riskUSD.
+double CalculateRiskLimitedLot(ENUM_ORDER_TYPE orderType,
+                               double entryPrice,
+                               double stopPrice,
+                               double riskUSD)
+{
+   if(riskUSD <= 0.0)
+      return 0.0;
+
+   double lossPerLot = CalculateLossPerLot(orderType, entryPrice, stopPrice);
+   if(lossPerLot <= 0.0)
+      return 0.0;
+
+   return NormalizeTradeVolume(riskUSD / lossPerLot);
+}
+
+double RecoveryRiskBudgetUSD()
+{
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   if(equity <= 0.0)
+      return 0.0;
+
+   double perLeg = equity * MathMax(0.0, RecoveryRiskPercent) / 100.0;
+   double basket = equity * MathMax(0.0, MaxRecoveryBasketRiskPercent) / 100.0;
+
+   if(basket > 0.0)
+      perLeg = MathMin(perLeg, MathMax(0.0, basket - RecoveryRiskUSD));
+
+   return MathMax(0.0, perLeg);
+}
+
+//================================================================================================//
 void ManageRecoveryStage1(ENUM_POSITION_TYPE primaryType)
 {
    if(!EnableRecovery || RecoveryStage > 0 || HasRecoveryPending())
@@ -725,8 +794,33 @@ void ManageRecoveryStage1(ENUM_POSITION_TYPE primaryType)
    if(RecoveryOnlyWhenMinus && basketBefore >= 0.0)
       return;
 
-   double lot =
-      NormalizeTradeVolume(primaryLots * Recovery1Multiplier);
+   ENUM_ORDER_TYPE recoveryType =
+      (primaryType == POSITION_TYPE_BUY)
+      ? ORDER_TYPE_SELL
+      : ORDER_TYPE_BUY;
+
+   double entryPrice =
+      (recoveryType == ORDER_TYPE_BUY)
+      ? SymbolInfoDouble(SymbolTrade, SYMBOL_ASK)
+      : SymbolInfoDouble(SymbolTrade, SYMBOL_BID);
+
+   double stopDistancePrice = Recovery1GapPoints * point;
+   double stopPrice =
+      (recoveryType == ORDER_TYPE_BUY)
+      ? entryPrice - stopDistancePrice
+      : entryPrice + stopDistancePrice;
+
+   double riskBudget = RecoveryRiskBudgetUSD();
+   double lot = CalculateRiskLimitedLot(
+      recoveryType,
+      entryPrice,
+      stopPrice,
+      riskBudget
+   );
+
+   // Legacy multiplier is retained only as an additional ceiling.
+   if(Recovery1Multiplier > 0.0)
+      lot = NormalizeTradeVolume(MathMin(lot, primaryLots * Recovery1Multiplier));
 
    if(Recovery1MaxLot > 0.0)
       lot = NormalizeTradeVolume(MathMin(lot, Recovery1MaxLot));
@@ -742,13 +836,13 @@ void ManageRecoveryStage1(ENUM_POSITION_TYPE primaryType)
    if(lot <= 0)
       return;
 
-   ExecuteRecoveryTrade(
-      primaryType == POSITION_TYPE_BUY
-      ? ORDER_TYPE_SELL
-      : ORDER_TYPE_BUY,
-      lot,
-      1
-   );
+   if(lot <= 0.0)
+   {
+      PrintFormat("RECOVERY 1 BLOCKED | risk budget %.2f USD produced no valid broker volume", riskBudget);
+      return;
+   }
+
+   ExecuteRecoveryTrade(recoveryType, lot, 1);
 }
 
 //================================================================================================//
@@ -801,8 +895,33 @@ void ManageRecoveryStage2()
    if(primaryLots <= 0)
       return;
 
-   double lot =
-      NormalizeTradeVolume(primaryLots * Recovery2Multiplier);
+   ENUM_ORDER_TYPE recoveryType =
+      (Recovery1Type == POSITION_TYPE_SELL)
+      ? ORDER_TYPE_BUY
+      : ORDER_TYPE_SELL;
+
+   double entryPrice =
+      (recoveryType == ORDER_TYPE_BUY)
+      ? SymbolInfoDouble(SymbolTrade, SYMBOL_ASK)
+      : SymbolInfoDouble(SymbolTrade, SYMBOL_BID);
+
+   double stopDistancePrice = Recovery2GapPoints * point;
+   double stopPrice =
+      (recoveryType == ORDER_TYPE_BUY)
+      ? entryPrice - stopDistancePrice
+      : entryPrice + stopDistancePrice;
+
+   double riskBudget = RecoveryRiskBudgetUSD();
+   double lot = CalculateRiskLimitedLot(
+      recoveryType,
+      entryPrice,
+      stopPrice,
+      riskBudget
+   );
+
+   // Legacy multiplier is retained only as an additional ceiling.
+   if(Recovery2Multiplier > 0.0)
+      lot = NormalizeTradeVolume(MathMin(lot, primaryLots * Recovery2Multiplier));
 
    if(Recovery2MaxLot > 0.0)
       lot = NormalizeTradeVolume(MathMin(lot, Recovery2MaxLot));
@@ -818,13 +937,13 @@ void ManageRecoveryStage2()
    if(lot <= 0)
       return;
 
-   ExecuteRecoveryTrade(
-      Recovery1Type == POSITION_TYPE_SELL
-      ? ORDER_TYPE_BUY
-      : ORDER_TYPE_SELL,
-      lot,
-      2
-   );
+   if(lot <= 0.0)
+   {
+      PrintFormat("RECOVERY 2 BLOCKED | risk budget %.2f USD produced no valid broker volume", riskBudget);
+      return;
+   }
+
+   ExecuteRecoveryTrade(recoveryType, lot, 2);
 }
 
 //================================================================================================//
@@ -1096,6 +1215,32 @@ void UpdateStatus()
 
    RecoveryProfit =
       Recovery1Profit + Recovery2Profit;
+
+   // Conservative modeled recovery risk: each live recovery leg is
+   // valued against its configured adverse distance.
+   RecoveryRiskUSD = 0.0;
+
+   if(Recovery1Lots > 0.0 && Recovery1EntryPrice > 0.0 && Recovery1Type != WRONG_VALUE)
+   {
+      ENUM_ORDER_TYPE r1Order =
+         (Recovery1Type == POSITION_TYPE_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+      double r1Stop =
+         (Recovery1Type == POSITION_TYPE_BUY)
+         ? Recovery1EntryPrice - (Recovery1GapPoints * SymbolInfoDouble(SymbolTrade, SYMBOL_POINT))
+         : Recovery1EntryPrice + (Recovery1GapPoints * SymbolInfoDouble(SymbolTrade, SYMBOL_POINT));
+      RecoveryRiskUSD += CalculateLossPerLot(r1Order, Recovery1EntryPrice, r1Stop) * Recovery1Lots;
+   }
+
+   if(Recovery2Lots > 0.0 && Recovery2EntryPrice > 0.0 && Recovery2Type != WRONG_VALUE)
+   {
+      ENUM_ORDER_TYPE r2Order =
+         (Recovery2Type == POSITION_TYPE_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+      double r2Stop =
+         (Recovery2Type == POSITION_TYPE_BUY)
+         ? Recovery2EntryPrice - (Recovery2GapPoints * SymbolInfoDouble(SymbolTrade, SYMBOL_POINT))
+         : Recovery2EntryPrice + (Recovery2GapPoints * SymbolInfoDouble(SymbolTrade, SYMBOL_POINT));
+      RecoveryRiskUSD += CalculateLossPerLot(r2Order, Recovery2EntryPrice, r2Stop) * Recovery2Lots;
+   }
 
    RecoveryActive =
       (RecoveryStage > 0);
@@ -1372,6 +1517,8 @@ void DisplayDashboard(double dd, double rsi, bool recovery)
       " | Trail: ", (BasketTrailingActive ? "ON" : "OFF"),
       " | Peak: ", DoubleToString(BasketPeakProfit, 2), "\n",
       "Recovery Cap: ", (MaxRecoveryBasketLots > 0.0 ? DoubleToString(MaxRecoveryBasketLots, 2) : "OFF"), "\n",
+      "Recovery Risk: ", DoubleToString(RecoveryRiskUSD, 2),
+      " / ", DoubleToString(AccountInfoDouble(ACCOUNT_EQUITY) * MaxRecoveryBasketRiskPercent / 100.0, 2), " USD\n",
       "R1: ", DoubleToString(Recovery1Multiplier, 2),
       "x / ", DoubleToString(Recovery1GapPoints, 0), " pts",
       " | R2: ", DoubleToString(Recovery2Multiplier, 2),
