@@ -329,12 +329,16 @@ void OnTick()
       return;
    }
 
-   // Cooldown after any completed basket close prevents immediate re-entry churn.
-   if(IsReentryBlocked())
+   // Cooldown applies only when there is no live primary/recovery basket.
+   // Existing positions must continue to be managed without interruption.
+   if(!RecoveryActive &&
+      BuyOrders == 0 &&
+      SellOrders == 0 &&
+      IsReentryBlocked())
    {
       DisplayDashboard(currentDrawdown,
                        GetRSIValue(),
-                       RecoveryActive);
+                       false);
       return;
    }
 
