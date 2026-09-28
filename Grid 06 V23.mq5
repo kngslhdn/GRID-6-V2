@@ -4,7 +4,7 @@
 //================================================================================================//
 #property strict
 #property copyright "Copyright 2026, Jarvis"
-#property version   "6.50"
+#property version   "6.60"
 
 //--- Enums ---
 enum Type {Open_Buy_And_Sell, Open__Only_Buy, Open__Only_Sell};
@@ -92,7 +92,9 @@ input bool   BlockNewEntries        = true;
 input bool   BlockGridExpansion     = true;
 input bool   BlockRecovery          = true;
 input int    NewsRefreshSeconds     = 10;
-input bool   NewsFailSafeBlock      = false; // true = block new/recovery entries if calendar lookup fails
+input bool   NewsFailSafeBlock      = true;  // live safety: block new/recovery entries if calendar lookup fails
+input int    NewsErrorRetrySeconds  = 60;    // minimum retry interval after a calendar error
+input double MinReentryDelaySeconds = 60.0;  // cooldown after a completed basket close
 
 //--- Global Variables ---
 string SymbolTrade;
@@ -112,6 +114,11 @@ bool     NewsDataAvailable    = false;
 datetime LastNewsCheckTime    = 0;
 datetime LastNewsEventTime    = 0;
 string   LastNewsEventName    = "";
+datetime LastNewsErrorTime    = 0;
+int      LastNewsErrorCode    = 0;
+
+// Prevent immediate re-entry after a basket is closed.
+datetime LastBasketCloseTime  = 0;
 
 //========================================================
 // ADAPTIVE EQUITY VARIABLES
@@ -322,6 +329,15 @@ void OnTick()
       return;
    }
 
+   // Cooldown after any completed basket close prevents immediate re-entry churn.
+   if(IsReentryBlocked())
+   {
+      DisplayDashboard(currentDrawdown,
+                       GetRSIValue(),
+                       RecoveryActive);
+      return;
+   }
+
    bool allowNewEntries      = !(newsBlockedNow && BlockNewEntries);
    bool allowGridExpansion   = !(newsBlockedNow && BlockGridExpansion);
    bool allowRecoveryEntries = !(newsBlockedNow && BlockRecovery);
@@ -391,11 +407,33 @@ void OnTick()
                     RecoveryActive);
 }
 //================================================================================================//
+bool IsReentryBlocked()
+{
+   if(MinReentryDelaySeconds <= 0.0 || LastBasketCloseTime <= 0)
+      return false;
+
+   double elapsed = (double)(TimeCurrent() - LastBasketCloseTime);
+   return (elapsed >= 0.0 && elapsed < MinReentryDelaySeconds);
+}
+
+//================================================================================================//
 // NEWS FILTER ENGINE
 // Uses MT5 Economic Calendar. Calendar times are trade-server times.
 //================================================================================================//
 bool IsNewsBlocked()
 {
+   // Built-in MT5 Economic Calendar functions are not available in the Strategy Tester.
+   // Calling them there raises ERR_FUNCTION_NOT_ALLOWED (4014), so tester runs
+   // deliberately bypass the live calendar. Historical news must be supplied externally.
+   if(MQLInfoInteger(MQL_TESTER))
+   {
+      NewsBlocked       = false;
+      NewsDataAvailable = false;
+      LastNewsEventTime = 0;
+      LastNewsEventName = "";
+      return false;
+   }
+
    if(!EnableNewsFilter)
    {
       NewsBlocked       = false;
@@ -411,6 +449,12 @@ bool IsNewsBlocked()
 
    if(LastNewsCheckTime != 0 &&
       (now - LastNewsCheckTime) < refresh)
+   {
+      return NewsBlocked;
+   }
+
+   if(LastNewsErrorTime != 0 &&
+      (now - LastNewsErrorTime) < MathMax(1, NewsErrorRetrySeconds))
    {
       return NewsBlocked;
    }
@@ -453,18 +497,32 @@ bool IsNewsBlocked()
    {
       int err = GetLastError();
 
-      PrintFormat(
-         "NEWS FILTER WARNING: CalendarValueHistory failed | currency=%s | error=%d | fail_safe=%s",
-         currency,
-         err,
-         NewsFailSafeBlock ? "BLOCK" : "ALLOW"
-      );
+      bool shouldLog =
+         (LastNewsErrorTime == 0 ||
+          err != LastNewsErrorCode ||
+          (now - LastNewsErrorTime) >= MathMax(1, NewsErrorRetrySeconds));
 
+      LastNewsErrorTime = now;
+      LastNewsErrorCode = err;
+      NewsDataAvailable = false;
       NewsBlocked = NewsFailSafeBlock;
+
+      if(shouldLog)
+      {
+         PrintFormat(
+            "NEWS FILTER WARNING: CalendarValueHistory failed | currency=%s | error=%d | fail_safe=%s",
+            currency,
+            err,
+            NewsFailSafeBlock ? "BLOCK" : "ALLOW"
+         );
+      }
+
       return NewsBlocked;
    }
 
    NewsDataAvailable = true;
+   LastNewsErrorTime = 0;
+   LastNewsErrorCode = 0;
 
    for(int i = 0; i < count; i++)
    {
@@ -623,7 +681,12 @@ double NormalizeTradeVolume(double volume)
    if(volume <= 0.0)
       return 0.0;
 
-   volume = MathMin(maxLot, MathMax(minLot, volume));
+   // Never round a calculated risk volume UP to broker minimum.
+   // If the safe volume is below minimum, block the trade instead.
+   if(volume < minLot)
+      return 0.0;
+
+   volume = MathMin(maxLot, volume);
 
    // Round DOWN to the broker step so requested volume never exceeds
    // the intended calculated exposure.
@@ -1093,6 +1156,36 @@ void ManageRecoveryStage2()
 }
 
 //================================================================================================//
+bool ValidateTradeRequest(MqlTradeRequest &req, const string context)
+{
+   MqlTradeCheckResult check = {};
+   ResetLastError();
+
+   if(!OrderCheck(req, check))
+   {
+      PrintFormat("ORDER CHECK FAILED | %s | Error=%d | Retcode=%u | Comment=%s | MarginFree=%.2f",
+                  context,
+                  GetLastError(),
+                  check.retcode,
+                  check.comment,
+                  check.margin_free);
+      return false;
+   }
+
+   if(check.retcode != TRADE_RETCODE_DONE)
+   {
+      PrintFormat("ORDER CHECK REJECTED | %s | Retcode=%u | Comment=%s | MarginFree=%.2f",
+                  context,
+                  check.retcode,
+                  check.comment,
+                  check.margin_free);
+      return false;
+   }
+
+   return true;
+}
+
+//================================================================================================//
 void ExecuteRecoveryTrade(ENUM_ORDER_TYPE type, double lot, int stage)
 {
    MqlTradeRequest req = {};
@@ -1117,6 +1210,13 @@ void ExecuteRecoveryTrade(ENUM_ORDER_TYPE type, double lot, int stage)
                    stage,
                    type == ORDER_TYPE_BUY ? "BUY" : "SELL");
 
+   if(!ValidateTradeRequest(req,
+                            StringFormat("RECOVERY %d %s %.2f",
+                                         stage,
+                                         EnumToString(type),
+                                         lot)))
+      return;
+
    ResetLastError();
 
    if(!OrderSend(req, res))
@@ -1138,7 +1238,9 @@ void ExecuteRecoveryTrade(ENUM_ORDER_TYPE type, double lot, int stage)
       return;
    }
 
-   RecoveryStartedTime = TimeCurrent();
+   if(stage == 1 || RecoveryStartedTime <= 0)
+      RecoveryStartedTime = TimeCurrent();
+
    RecoveryPeakProfit = 0.0;
    RecoveryTrailingActive = false;
 
@@ -1465,6 +1567,12 @@ void ExecuteTrade(ENUM_ORDER_TYPE type)
                    type == ORDER_TYPE_BUY ? "BUY" : "SELL",
                    c + 1);
 
+   if(!ValidateTradeRequest(req,
+                            StringFormat("PRIMARY %s %.2f",
+                                         EnumToString(type),
+                                         req.volume)))
+      return;
+
    ResetLastError();
 
    if(!OrderSend(req, res))
@@ -1527,6 +1635,13 @@ bool CloseOrdersByType(ENUM_POSITION_TYPE type)
       req.deviation    = 10;
       req.type_filling = GetMarketFillingMode();
 
+      if(!ValidateTradeRequest(req,
+                               StringFormat("CLOSE ticket=%I64u", t)))
+      {
+         sendFailures = true;
+         continue;
+      }
+
       ResetLastError();
 
       if(!OrderSend(req, res))
@@ -1574,7 +1689,12 @@ bool CloseAllOrders()
 {
    bool buysClosed  = CloseOrdersByType(POSITION_TYPE_BUY);
    bool sellsClosed = CloseOrdersByType(POSITION_TYPE_SELL);
-   return (buysClosed && sellsClosed);
+   bool allClosed   = (buysClosed && sellsClosed);
+
+   if(allClosed)
+      LastBasketCloseTime = TimeCurrent();
+
+   return allClosed;
 }
 
 //================================================================================================//
@@ -1657,6 +1777,8 @@ void DisplayDashboard(double dd, double rsi, bool recovery)
       "RSI (14) : ", DoubleToString(rsi, 2), "\n",
       "News     : ", (EnableNewsFilter ? (NewsBlocked ? "BLOCKED" : "CLEAR") : "OFF"), "\n",
       "News Event : ", (LastNewsEventName == "" ? "-" : LastNewsEventName), "\n",
+      "News Data : ", (MQLInfoInteger(MQL_TESTER) ? "TESTER-BYPASS (external CSV needed)" : (NewsDataAvailable ? "AVAILABLE" : "UNAVAILABLE")), "\n",
+      "Reentry Cooldown: ", (IsReentryBlocked() ? "ACTIVE" : "CLEAR"), "\n",
       "----------------------------------\n",
       "BUY Primary : ", BuyOrders,
       " | Lot: ", DoubleToString(BuyLots, 2),
