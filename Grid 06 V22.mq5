@@ -11,7 +11,7 @@ enum Type {Open_Buy_And_Sell, Open__Only_Buy, Open__Only_Sell};
 
 //--- Input Parameters ---
 input string SafeParameters       = "||========== SAFETY & RECOVERY ==========||";
-input double MaxEquityLossPercent = 15.0;
+input double MaxEquityLossPercent = 45.0;
 input bool   UseTrailingProfit    = true;
 input double TrailingStartUSD     = 5.0;
 input double TrailingStopUSD      = 2.0;
@@ -19,8 +19,8 @@ input double TrailingStopUSD      = 2.0;
 input string RSI_Settings         = "||========== INDICATORS ==========||";
 input int    MAPeriod             = 200;
 input int    RSIPeriod            = 14;
-input int    RSIUpper             = 63;
-input int    RSILower             = 37;
+input int    RSIUpper             = 61;
+input int    RSILower             = 39;
 
 input string Grid_Settings        = "||========== GRID LOGIC ==========||";
 input Type   TypeOrdersPlace      = Open_Buy_And_Sell;
@@ -40,10 +40,10 @@ input string RecoverySettings       = "||========== TWO-STAGE RECOVERY =========
 input bool   EnableRecovery         = true;
 input double Recovery1Multiplier    = 1.50;
 input double Recovery1GapPoints     = 2500.0;
-input double Recovery1MaxLot        = 0.05;
+input double Recovery1MaxLot        = 2.0;
 input double Recovery2Multiplier    = 2.0;
 input double Recovery2GapPoints     = 1500.0;
-input double Recovery2MaxLot        = 0.05;
+input double Recovery2MaxLot        = 4.0;
 input bool   RecoveryOnlyWhenMinus  = true;
 input int    MaxRecoveryStages      = 1;
 
