@@ -1,10 +1,10 @@
 //================================================================================================//
 // Expert Advisor: GRID 06.V02 - RECOVERY & GROWTH EDITION 2026
-// Adaptive Equity Scaling Edition - V23 FIXED ENGINE + V12 TWO-STAGE RECOVERY
+// Adaptive Equity Scaling Edition - V23 FIXED ENGINE + V12 TWO-STAGE RECOVERY + SAFETY PATCH
 //================================================================================================//
 #property strict
 #property copyright "Copyright 2026, Jarvis"
-#property version   "6.24"
+#property version   "6.25"
 
 //--- Enums ---
 enum Type {Open_Buy_And_Sell, Open__Only_Buy, Open__Only_Sell};
@@ -46,6 +46,7 @@ input double Recovery2GapPoints     = 1500.0;
 input double Recovery2MaxLot        = 2.0;
 input bool   RecoveryOnlyWhenMinus  = true;
 input int    MaxRecoveryStages      = 2;
+input double MaxRecoveryBasketLots  = 0.0; // 0 = disabled; caps R1+R2 recovery exposure
 
 input int    MagicNumber          = 16082016;
 input string CommentsOrders       = "GRID 3 Buy Sell";
@@ -74,6 +75,7 @@ input bool   BlockNewEntries        = true;
 input bool   BlockGridExpansion     = true;
 input bool   BlockRecovery          = true;
 input int    NewsRefreshSeconds     = 10;
+input bool   NewsFailSafeBlock      = false; // true = block new/recovery entries if calendar lookup fails
 
 //--- Global Variables ---
 string SymbolTrade;
@@ -259,8 +261,16 @@ void OnTick()
                   equity,
                   AdaptiveEquityBase);
 
-      CloseAllOrders();
-      IsTerminated = true;
+      bool emergencyClosed = CloseAllOrders();
+      if(emergencyClosed)
+      {
+         IsTerminated = true;
+         Print("EMERGENCY CUT LOSS COMPLETE -> EA TERMINATED.");
+      }
+      else
+      {
+         Print("EMERGENCY CUT LOSS CLOSE INCOMPLETE -> retrying on next tick.");
+      }
       return;
    }
 
@@ -407,15 +417,15 @@ bool IsNewsBlocked()
    {
       int err = GetLastError();
 
-      // Fail-open: calendar availability must not terminate the EA.
-      // Journal makes the condition visible for live/test diagnostics.
       PrintFormat(
-         "NEWS FILTER WARNING: CalendarValueHistory failed | currency=%s | error=%d",
+         "NEWS FILTER WARNING: CalendarValueHistory failed | currency=%s | error=%d | fail_safe=%s",
          currency,
-         err
+         err,
+         NewsFailSafeBlock ? "BLOCK" : "ALLOW"
       );
 
-      return false;
+      NewsBlocked = NewsFailSafeBlock;
+      return NewsBlocked;
    }
 
    NewsDataAvailable = true;
@@ -544,26 +554,58 @@ void ManageBasketExit()
 }
 
 //================================================================================================//
-double NormalizeRecoveryVolume(double volume)
+double NormalizeTradeVolume(double volume)
 {
    double minLot = SymbolInfoDouble(SymbolTrade, SYMBOL_VOLUME_MIN);
    double maxLot = SymbolInfoDouble(SymbolTrade, SYMBOL_VOLUME_MAX);
    double step   = SymbolInfoDouble(SymbolTrade, SYMBOL_VOLUME_STEP);
 
-   if(minLot <= 0) minLot = 0.01;
-   if(step <= 0) step = 0.01;
-   if(maxLot <= 0) maxLot = volume;
+   if(minLot <= 0.0) minLot = 0.01;
+   if(step <= 0.0)   step   = minLot;
+   if(maxLot <= 0.0) maxLot = volume;
 
-   volume = MathMax(minLot, MathMin(maxLot, volume));
-   volume = MathRound(volume / step) * step;
-   volume = MathMax(minLot, MathMin(maxLot, volume));
+   if(volume <= 0.0)
+      return 0.0;
 
-   int digits = (step < 0.01) ? 3 : 2;
-   if(step < 0.001) digits = 4;
+   volume = MathMin(maxLot, MathMax(minLot, volume));
+
+   // Round DOWN to the broker step so requested volume never exceeds
+   // the intended calculated exposure.
+   volume = MathFloor((volume / step) + 1e-9) * step;
+
+   if(volume < minLot)
+      return 0.0;
+
+   int digits = 0;
+   double tmp = step;
+   while(digits < 8 && MathAbs(tmp - MathRound(tmp)) > 1e-9)
+   {
+      tmp *= 10.0;
+      digits++;
+   }
 
    return NormalizeDouble(volume, digits);
 }
 
+//================================================================================================//
+ENUM_ORDER_TYPE_FILLING GetMarketFillingMode()
+{
+   long filling = SymbolInfoInteger(SymbolTrade, SYMBOL_FILLING_MODE);
+   long execution = SymbolInfoInteger(SymbolTrade, SYMBOL_TRADE_EXEMODE);
+
+   if((filling & SYMBOL_FILLING_FOK) == SYMBOL_FILLING_FOK)
+      return ORDER_FILLING_FOK;
+
+   if((filling & SYMBOL_FILLING_IOC) == SYMBOL_FILLING_IOC)
+      return ORDER_FILLING_IOC;
+
+   if(execution != SYMBOL_TRADE_EXECUTION_MARKET)
+      return ORDER_FILLING_RETURN;
+
+   return ORDER_FILLING_FOK;
+}
+
+//================================================================================================//
 //================================================================================================//
 bool HasRecoveryPending()
 {
@@ -684,10 +726,18 @@ void ManageRecoveryStage1(ENUM_POSITION_TYPE primaryType)
       return;
 
    double lot =
-      NormalizeRecoveryVolume(primaryLots * Recovery1Multiplier);
+      NormalizeTradeVolume(primaryLots * Recovery1Multiplier);
 
    if(Recovery1MaxLot > 0.0)
-      lot = NormalizeRecoveryVolume(MathMin(lot, Recovery1MaxLot));
+      lot = NormalizeTradeVolume(MathMin(lot, Recovery1MaxLot));
+
+   if(MaxRecoveryBasketLots > 0.0)
+   {
+      double remaining = MaxRecoveryBasketLots - RecoveryLots;
+      if(remaining <= 0.0)
+         return;
+      lot = NormalizeTradeVolume(MathMin(lot, remaining));
+   }
 
    if(lot <= 0)
       return;
@@ -752,10 +802,18 @@ void ManageRecoveryStage2()
       return;
 
    double lot =
-      NormalizeRecoveryVolume(primaryLots * Recovery2Multiplier);
+      NormalizeTradeVolume(primaryLots * Recovery2Multiplier);
 
    if(Recovery2MaxLot > 0.0)
-      lot = NormalizeRecoveryVolume(MathMin(lot, Recovery2MaxLot));
+      lot = NormalizeTradeVolume(MathMin(lot, Recovery2MaxLot));
+
+   if(MaxRecoveryBasketLots > 0.0)
+   {
+      double remaining = MaxRecoveryBasketLots - RecoveryLots;
+      if(remaining <= 0.0)
+         return;
+      lot = NormalizeTradeVolume(MathMin(lot, remaining));
+   }
 
    if(lot <= 0)
       return;
@@ -781,7 +839,7 @@ void ExecuteRecoveryTrade(ENUM_ORDER_TYPE type, double lot, int stage)
    req.volume       = lot;
    req.type         = type;
    req.deviation    = 10;
-   req.type_filling = ORDER_FILLING_IOC;
+   req.type_filling = GetMarketFillingMode();
 
    req.price =
       (type == ORDER_TYPE_BUY)
@@ -1083,10 +1141,16 @@ void ExecuteTrade(ENUM_ORDER_TYPE type)
    req.action       = TRADE_ACTION_DEAL;
    req.symbol       = SymbolTrade;
    req.magic        = OrdersID;
-   req.volume       = NormalizeDouble(ManualLotSize * (c + 1), 2);
+   req.volume       = NormalizeTradeVolume(ManualLotSize * (c + 1));
+   if(req.volume <= 0.0)
+   {
+      PrintFormat("PRIMARY OPEN BLOCKED | invalid broker volume | requested=%.4f", ManualLotSize * (c + 1));
+      return;
+   }
+
    req.type         = type;
    req.deviation    = 10;
-   req.type_filling = ORDER_FILLING_IOC;
+   req.type_filling = GetMarketFillingMode();
 
    req.price =
       (type == ORDER_TYPE_BUY)
@@ -1127,8 +1191,10 @@ void ExecuteTrade(ENUM_ORDER_TYPE type)
                res.price);
 }
 //================================================================================================//
-void CloseOrdersByType(ENUM_POSITION_TYPE type)
+bool CloseOrdersByType(ENUM_POSITION_TYPE type)
 {
+   bool sendFailures = false;
+
    for(int i = PositionsTotal() - 1; i >= 0; i--)
    {
       ulong t = PositionGetTicket(i);
@@ -1136,10 +1202,6 @@ void CloseOrdersByType(ENUM_POSITION_TYPE type)
       if(!PositionSelectByTicket(t))
          continue;
 
-      //========================================================
-      // SYMBOL ISOLATION
-      // Never close another symbol with the same magic number.
-      //========================================================
       if(PositionGetInteger(POSITION_MAGIC) != OrdersID)
          continue;
 
@@ -1156,51 +1218,64 @@ void CloseOrdersByType(ENUM_POSITION_TYPE type)
       req.position = t;
       req.symbol   = SymbolTrade;
       req.volume   = PositionGetDouble(POSITION_VOLUME);
-
-      req.type =
-         (type == POSITION_TYPE_BUY)
-         ? ORDER_TYPE_SELL
-         : ORDER_TYPE_BUY;
-
-      req.price =
-         (type == POSITION_TYPE_BUY)
-         ? SymbolInfoDouble(SymbolTrade, SYMBOL_BID)
-         : SymbolInfoDouble(SymbolTrade, SYMBOL_ASK);
+      req.type     = (type == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+      req.price    = (type == POSITION_TYPE_BUY)
+                     ? SymbolInfoDouble(SymbolTrade, SYMBOL_BID)
+                     : SymbolInfoDouble(SymbolTrade, SYMBOL_ASK);
+      req.deviation    = 10;
+      req.type_filling = GetMarketFillingMode();
 
       ResetLastError();
 
       if(!OrderSend(req, res))
       {
-         PrintFormat("Gagal menutup tiket #%I64u. Error: %d",
-                     t,
-                     GetLastError());
+         sendFailures = true;
+         PrintFormat("CLOSE SEND FAILED | Ticket=%I64u | Error=%d", t, GetLastError());
          continue;
       }
 
       if(res.retcode != TRADE_RETCODE_DONE &&
          res.retcode != TRADE_RETCODE_DONE_PARTIAL)
       {
+         sendFailures = true;
          PrintFormat("CLOSE REJECTED | Ticket=%I64u | Retcode=%u | Comment=%s",
-                     t,
-                     res.retcode,
-                     res.comment);
+                     t, res.retcode, res.comment);
          continue;
       }
 
       PrintFormat("CLOSE OK | Ticket=%I64u | Deal=%I64u | Volume=%.2f | Price=%.5f",
-                  t,                  res.deal,
-                  req.volume,
-                  res.price);
+                  t, res.deal, req.volume, res.price);
    }
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong t = PositionGetTicket(i);
+      if(t == 0 || !PositionSelectByTicket(t))
+         continue;
+
+      if(PositionGetInteger(POSITION_MAGIC) != OrdersID)
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) != SymbolTrade)
+         continue;
+      if(PositionGetInteger(POSITION_TYPE) != type)
+         continue;
+
+      sendFailures = true;
+      break;
+   }
+
+   return !sendFailures;
 }
 
 //================================================================================================//
-void CloseAllOrders()
+bool CloseAllOrders()
 {
-   CloseOrdersByType(POSITION_TYPE_BUY);
-   CloseOrdersByType(POSITION_TYPE_SELL);
+   bool buysClosed  = CloseOrdersByType(POSITION_TYPE_BUY);
+   bool sellsClosed = CloseOrdersByType(POSITION_TYPE_SELL);
+   return (buysClosed && sellsClosed);
 }
 
+//================================================================================================//
 //================================================================================================//
 void LogBasketExposure()
 {
@@ -1245,10 +1320,10 @@ void LogBasketExposure()
          SymbolTrade,
          BuyOrders,
          buyVolume,
-         BuyProfits,
+         BuyProfit,
          SellOrders,
          sellVolume,
-         SellProfits,
+         SellProfit,
          buyVolume + sellVolume
       );
 
@@ -1256,8 +1331,8 @@ void LogBasketExposure()
       LastLoggedSellOrders = SellOrders;
       LastLoggedBuyVolume  = buyVolume;
       LastLoggedSellVolume = sellVolume;
-      LastLoggedBuyProfit  = BuyProfits;
-      LastLoggedSellProfit = SellProfits;
+      LastLoggedBuyProfit  = BuyProfit;
+      LastLoggedSellProfit = SellProfit;
    }
 }
 
@@ -1296,6 +1371,7 @@ void DisplayDashboard(double dd, double rsi, bool recovery)
       "Basket P/L: ", DoubleToString(BasketProfitValue, 2),
       " | Trail: ", (BasketTrailingActive ? "ON" : "OFF"),
       " | Peak: ", DoubleToString(BasketPeakProfit, 2), "\n",
+      "Recovery Cap: ", (MaxRecoveryBasketLots > 0.0 ? DoubleToString(MaxRecoveryBasketLots, 2) : "OFF"), "\n",
       "R1: ", DoubleToString(Recovery1Multiplier, 2),
       "x / ", DoubleToString(Recovery1GapPoints, 0), " pts",
       " | R2: ", DoubleToString(Recovery2Multiplier, 2),
