@@ -40,14 +40,14 @@ input int    MaxOrders               = 3;
 // basket loss at trigger time instead of using a fixed multiplier.
 // R2 is also loss-based: if R1 fails, R2 recalculates the full current basket loss.
 input bool   EnableRecovery          = true;
-// R1 is calculated from the actual 1/2/3 primary basket loss.
-// The multiplier is no longer used for R1 sizing.
+// R1 is sized from the projected whole-basket result.
+// Recovery is no longer sized by a fixed multiplier.
 // Recovery1TargetMoveUSD defines the expected favorable Gold move
 // after R1 opens. R1 is sized so that this move recovers the
 // complete primary/basket loss plus TargetProfitUSD.
 input double Recovery1TargetMoveUSD  = 1.50;
 input double Recovery1MaxLot         = 2.0;
-// R2 is sized for a fast reversal recovery using the actual basket loss.
+// R2 is sized from the projected whole-basket result for fast reversal recovery.
 input double Recovery2TargetMoveUSD  = 1.50;
 input double Recovery2GapPoints      = 6250.0;
 // R2 may need to recover the primary basket + R1 loss.
@@ -294,47 +294,62 @@ void DeleteRecoveryPending(){
 }
 
 //+------------------------------------------------------------------+
-//| FUNCTION: CalculateRecovery1Lot                                  |
-//|                                                                  |
-//| R1 sizing is loss-based, not a fixed multiplier. The complete   |
-//| primary order 1/2/3 basket is measured at the moment R1 opens. |
-//| We then calculate the lot required to recover that loss plus    |
-//| TargetProfitUSD over Recovery1TargetMoveUSD in the favorable    |
-//| direction. OrderCalcProfit is used so tick value/contract size  |
-//| are handled by the broker's actual symbol specification.        |
+//| FUNCTION: ProjectBasketAtPrice                                  |
+//| Projects ALL existing EA positions at a hypothetical target.   |
 //+------------------------------------------------------------------+
-double CalculateRecovery1Lot(ENUM_POSITION_TYPE primaryType,double basketLoss){
-   if(basketLoss<=0.0 || Recovery1TargetMoveUSD<=0.0) return 0.0;
+double ProjectBasketAtPrice(double targetPrice){
+   double total=0.0;
+   for(int i=PositionsTotal()-1;i>=0;i--){
+      ulong ticket=PositionGetTicket(i);
+      if(!IsOurPosition(ticket)) continue;
+      ENUM_POSITION_TYPE type=(ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+      ENUM_ORDER_TYPE calcType=(type==POSITION_TYPE_BUY)?ORDER_TYPE_BUY:ORDER_TYPE_SELL;
+      double lot=PositionGetDouble(POSITION_VOLUME);
+      double open=PositionGetDouble(POSITION_PRICE_OPEN);
+      double swap=PositionGetDouble(POSITION_SWAP);
+      double p=0.0;
+      if(OrderCalcProfit(calcType,SymbolTrade,lot,open,targetPrice,p))
+         total+=p+swap;
+   }
+   return total;
+}
+
+//+------------------------------------------------------------------+
+//| FUNCTION: CalculateRecoveryLot                                  |
+//| Sizes recovery from the projected WHOLE BASKET, not recovery   |
+//| order P/L alone. At TargetMove, complete basket >= target.     |
+//+------------------------------------------------------------------+
+double CalculateRecoveryLot(ENUM_POSITION_TYPE recoveryType,double targetMoveUSD){
+   if(targetMoveUSD<=0.0) return 0.0;
 
    double bid=SymbolInfoDouble(SymbolTrade,SYMBOL_BID);
    double ask=SymbolInfoDouble(SymbolTrade,SYMBOL_ASK);
-   double entry=(primaryType==POSITION_TYPE_BUY)?bid:ask;
+   double entry=(recoveryType==POSITION_TYPE_BUY)?ask:bid;
    if(entry<=0.0) return 0.0;
 
-   double target=(primaryType==POSITION_TYPE_BUY)
-                 ? entry-Recovery1TargetMoveUSD
-                 : entry+Recovery1TargetMoveUSD;
+   double target=(recoveryType==POSITION_TYPE_BUY)
+                 ?entry+targetMoveUSD
+                 :entry-targetMoveUSD;
 
-   // R1 is opposite to the primary basket.
-   ENUM_ORDER_TYPE recoveryOrder=(primaryType==POSITION_TYPE_BUY)
-                                  ? ORDER_TYPE_SELL
-                                  : ORDER_TYPE_BUY;
-
+   double existingPL=ProjectBasketAtPrice(target);
+   ENUM_ORDER_TYPE orderType=(recoveryType==POSITION_TYPE_BUY)?ORDER_TYPE_BUY:ORDER_TYPE_SELL;
    double profitPerLot=0.0;
-   if(!OrderCalcProfit(recoveryOrder,SymbolTrade,1.0,entry,target,profitPerLot))
+   if(!OrderCalcProfit(orderType,SymbolTrade,1.0,entry,target,profitPerLot))
       return 0.0;
-
    profitPerLot=MathAbs(profitPerLot);
    if(profitPerLot<=0.0) return 0.0;
 
-   double requiredProfit=basketLoss+MathMax(TargetProfitUSD,0.0);
-   double rawLot=requiredProfit/profitPerLot;
+   double required=TargetProfitUSD-existingPL;
+   if(required<=0.0) return 0.0;
 
-   // Round UP to the broker volume step so the calculated R1 does not
-   // undershoot the recovery amount because of nearest-step rounding.
+   double rawLot=required/profitPerLot;
    double step=SymbolInfoDouble(SymbolTrade,SYMBOL_VOLUME_STEP);
    if(step<=0.0) step=0.01;
    double lot=MathCeil((rawLot/step)-1e-9)*step;
+
+   PrintFormat("V12.04 RECOVERY CALC | type=%s | entry=%.5f | target=%.5f | existing@target=%.2f | perLot=%.2f | required=%.2f | raw=%.4f",
+      recoveryType==POSITION_TYPE_BUY?"BUY":"SELL",entry,target,existingPL,profitPerLot,required,rawLot);
+
    return NormalizeVolume(lot);
 }
 
@@ -348,87 +363,53 @@ void ManageRecoveryStage1(ENUM_POSITION_TYPE primaryType){
    double primaryPL=(primaryType==POSITION_TYPE_BUY)?BuyProfit:SellProfit;
    double primaryLots=(primaryType==POSITION_TYPE_BUY)?BuyLots:SellLots;
    double thirdPrice=(primaryType==POSITION_TYPE_BUY)?Buy3Price:Sell3Price;
-
    if(RecoveryOnlyWhenMinus && primaryPL>=0.0) return;
    if(primaryLots<=0 || thirdPrice<=0) return;
 
-   double point=SymbolInfoDouble(SymbolTrade,SYMBOL_POINT); if(point<=0) return;
-   double bid=SymbolInfoDouble(SymbolTrade,SYMBOL_BID), ask=SymbolInfoDouble(SymbolTrade,SYMBOL_ASK);
-   double adversePoints=(primaryType==POSITION_TYPE_BUY)?(thirdPrice-bid)/point:(ask-thirdPrice)/point;
+   double point=SymbolInfoDouble(SymbolTrade,SYMBOL_POINT);
+   if(point<=0) return;
+   double bid=SymbolInfoDouble(SymbolTrade,SYMBOL_BID);
+   double ask=SymbolInfoDouble(SymbolTrade,SYMBOL_ASK);
+   double adversePoints=(primaryType==POSITION_TYPE_BUY)
+                        ?(thirdPrice-bid)/point
+                        :(ask-thirdPrice)/point;
    if(adversePoints<Recovery1GapPoints) return;
 
    UpdateStatus();
    double basketBefore=BasketProfitValue;
    if(RecoveryOnlyWhenMinus && basketBefore>=0.0) return;
 
-   // Re-read the complete basket immediately before sizing R1.
-   // This includes all primary orders 1/2/3, not just the latest order.
-   UpdateStatus();
-   double basketLoss=MathAbs(BasketProfitValue);
-   if(RecoveryOnlyWhenMinus && basketLoss<=0.0) return;
+   ENUM_POSITION_TYPE r1Type=(primaryType==POSITION_TYPE_BUY)?POSITION_TYPE_SELL:POSITION_TYPE_BUY;
+   double rawLot=CalculateRecoveryLot(r1Type,Recovery1TargetMoveUSD);
+   if(rawLot<=0.0) return;
 
-   double lot=CalculateRecovery1Lot(primaryType,basketLoss);
-   if(Recovery1MaxLot>0.0) lot=NormalizeVolume(MathMin(lot,Recovery1MaxLot));
-   if(lot<=0){
-      PrintFormat("V12 R1 SIZE FAILED | basket=%.2f | targetMove=%.2f",
-                  BasketProfitValue,Recovery1TargetMoveUSD);
-      return;
+   double lot=rawLot;
+   bool capped=false;
+   if(Recovery1MaxLot>0.0 && lot>Recovery1MaxLot){
+      lot=NormalizeVolume(Recovery1MaxLot);
+      capped=true;
    }
+   if(lot<=0.0) return;
 
-   trade.SetExpertMagicNumber(OrdersID); trade.SetTypeFillingBySymbol(SymbolTrade);
-   bool ok=false; string c;
-   if(primaryType==POSITION_TYPE_BUY){
-      c=CommentsOrders+" RECOVERY 1 SELL";
-      ok=trade.Sell(lot,SymbolTrade,0,0,0,c);
-   }else{
+   trade.SetExpertMagicNumber(OrdersID);
+   trade.SetTypeFillingBySymbol(SymbolTrade);
+
+   bool ok=false;
+   string c;
+   if(r1Type==POSITION_TYPE_BUY){
       c=CommentsOrders+" RECOVERY 1 BUY";
       ok=trade.Buy(lot,SymbolTrade,0,0,0,c);
+   }else{
+      c=CommentsOrders+" RECOVERY 1 SELL";
+      ok=trade.Sell(lot,SymbolTrade,0,0,0,c);
    }
 
    if(ok && TradeOK())
-      PrintFormat("V12 R1 OPEN | primary=%s | basket=%.2f | primaryLots=%.2f | R1Lot=%.2f | targetMove=%.2f | adverse=%.0f",
-                  primaryType==POSITION_TYPE_BUY?"BUY":"SELL",basketBefore,primaryLots,lot,
-                  Recovery1TargetMoveUSD,adversePoints);
+      PrintFormat("V12.04 R1 OPEN | basket=%.2f | lot=%.2f | targetMove=%.2f | capped=%s",
+         basketBefore,lot,Recovery1TargetMoveUSD,capped?"YES":"NO");
    else
-      PrintFormat("V12 R1 FAILED | basket=%.2f | lot=%.2f | retcode=%u | %s",
-                  basketBefore,lot,trade.ResultRetcode(),trade.ResultRetcodeDescription());
-}
-
-//+------------------------------------------------------------------+
-//| FUNCTION: CalculateRecovery2Lot                                  |
-//| R2 is loss-based and sized for a fast reversal recovery.        |
-//+------------------------------------------------------------------+
-double CalculateRecovery2Lot(ENUM_POSITION_TYPE recoveryType,double basketLoss){
-   if(basketLoss<=0.0 || Recovery2TargetMoveUSD<=0.0) return 0.0;
-
-   double bid=SymbolInfoDouble(SymbolTrade,SYMBOL_BID);
-   double ask=SymbolInfoDouble(SymbolTrade,SYMBOL_ASK);
-   double entry=(recoveryType==POSITION_TYPE_BUY)?ask:bid;
-   if(entry<=0.0) return 0.0;
-
-   double target=(recoveryType==POSITION_TYPE_BUY)
-                 ? entry+Recovery2TargetMoveUSD
-                 : entry-Recovery2TargetMoveUSD;
-
-   ENUM_ORDER_TYPE recoveryOrder=(recoveryType==POSITION_TYPE_BUY)
-                                  ? ORDER_TYPE_BUY
-                                  : ORDER_TYPE_SELL;
-
-   double profitPerLot=0.0;
-   if(!OrderCalcProfit(recoveryOrder,SymbolTrade,1.0,entry,target,profitPerLot))
-      return 0.0;
-
-   profitPerLot=MathAbs(profitPerLot);
-   if(profitPerLot<=0.0) return 0.0;
-
-   double requiredProfit=basketLoss+MathMax(TargetProfitUSD,0.0);
-   double rawLot=requiredProfit/profitPerLot;
-
-   // Round UP so R2 does not undershoot because of broker volume steps.
-   double step=SymbolInfoDouble(SymbolTrade,SYMBOL_VOLUME_STEP);
-   if(step<=0.0) step=0.01;
-   double lot=MathCeil((rawLot/step)-1e-9)*step;
-   return NormalizeVolume(lot);
+      PrintFormat("V12.04 R1 FAILED | basket=%.2f | lot=%.2f | retcode=%u | %s",
+         basketBefore,lot,trade.ResultRetcode(),trade.ResultRetcodeDescription());
 }
 
 //+------------------------------------------------------------------+
@@ -442,31 +423,23 @@ void ManageRecoveryStage2(){
    UpdateStatus();
    if(RecoveryOnlyWhenMinus && BasketProfitValue>=0.0) return;
 
-   double point=SymbolInfoDouble(SymbolTrade,SYMBOL_POINT); if(point<=0) return;
-   double bid=SymbolInfoDouble(SymbolTrade,SYMBOL_BID), ask=SymbolInfoDouble(SymbolTrade,SYMBOL_ASK);
-   double adversePoints=0;
+   double point=SymbolInfoDouble(SymbolTrade,SYMBOL_POINT);
+   if(point<=0) return;
+   double bid=SymbolInfoDouble(SymbolTrade,SYMBOL_BID);
+   double ask=SymbolInfoDouble(SymbolTrade,SYMBOL_ASK);
+
+   double adversePoints=0.0;
    if(Recovery1Type==POSITION_TYPE_BUY) adversePoints=(Recovery1EntryPrice-bid)/point;
    else if(Recovery1Type==POSITION_TYPE_SELL) adversePoints=(ask-Recovery1EntryPrice)/point;
    else return;
-
    if(adversePoints<Recovery2GapPoints) return;
 
-   // Re-read the full live basket immediately before sizing R2.
    double basketBefore=BasketProfitValue;
-   double basketLoss=MathAbs(basketBefore);
-   if(basketLoss<=0.0) return;
+   if(basketBefore>=0.0) return;
 
-   // R2 is opposite to R1.
-   ENUM_POSITION_TYPE r2Type=(Recovery1Type==POSITION_TYPE_BUY)
-                              ? POSITION_TYPE_SELL
-                              : POSITION_TYPE_BUY;
-
-   double rawLot=CalculateRecovery2Lot(r2Type,basketLoss);
-   if(rawLot<=0.0){
-      PrintFormat("V12 R2 SIZE FAILED | basket=%.2f | targetMove=%.2f",
-                  basketBefore,Recovery2TargetMoveUSD);
-      return;
-   }
+   ENUM_POSITION_TYPE r2Type=(Recovery1Type==POSITION_TYPE_BUY)?POSITION_TYPE_SELL:POSITION_TYPE_BUY;
+   double rawLot=CalculateRecoveryLot(r2Type,Recovery2TargetMoveUSD);
+   if(rawLot<=0.0) return;
 
    double lot=rawLot;
    bool capped=false;
@@ -476,8 +449,11 @@ void ManageRecoveryStage2(){
    }
    if(lot<=0.0) return;
 
-   trade.SetExpertMagicNumber(OrdersID); trade.SetTypeFillingBySymbol(SymbolTrade);
-   bool ok=false; string c;
+   trade.SetExpertMagicNumber(OrdersID);
+   trade.SetTypeFillingBySymbol(SymbolTrade);
+
+   bool ok=false;
+   string c;
    if(r2Type==POSITION_TYPE_BUY){
       c=CommentsOrders+" RECOVERY 2 BUY";
       ok=trade.Buy(lot,SymbolTrade,0,0,0,c);
@@ -487,14 +463,13 @@ void ManageRecoveryStage2(){
    }
 
    if(ok && TradeOK())
-      PrintFormat("V12 R2 OPEN | basket=%.2f | R1PL=%.2f | R2Lot=%.2f | targetMove=%.2f | adverse=%.0f | capped=%s",
-                  basketBefore,Recovery1Profit,lot,Recovery2TargetMoveUSD,adversePoints,capped?"YES":"NO");
+      PrintFormat("V12.04 R2 OPEN | basket=%.2f | R1PL=%.2f | lot=%.2f | targetMove=%.2f | capped=%s",
+         basketBefore,Recovery1Profit,lot,Recovery2TargetMoveUSD,capped?"YES":"NO");
    else
-      PrintFormat("V12 R2 FAILED | basket=%.2f | lot=%.2f | retcode=%u | %s",
-                  basketBefore,lot,trade.ResultRetcode(),trade.ResultRetcodeDescription());
+      PrintFormat("V12.04 R2 FAILED | basket=%.2f | lot=%.2f | retcode=%u | %s",
+         basketBefore,lot,trade.ResultRetcode(),trade.ResultRetcodeDescription());
 }
 
-//+------------------------------------------------------------------+
 //+------------------------------------------------------------------+
 //| FUNCTION: ManagePrimaryGrid                                     |
 //+------------------------------------------------------------------+
@@ -625,8 +600,8 @@ void DisplayDashboard(double dd){
            "SELL: ",SellOrders," | lot=",DoubleToString(SellLots,2)," | P/L=",DoubleToString(SellProfit,2),"\n",
            "R1: ",(RecoveryStage>=1?"ACTIVE":"OFF")," | lot=",DoubleToString(Recovery1Lots,2)," | P/L=",DoubleToString(Recovery1Profit,2),"\n",
            "R2: ",(RecoveryStage>=2?"ACTIVE":"OFF")," | lot=",DoubleToString(Recovery2Lots,2)," | P/L=",DoubleToString(Recovery2Profit,2),"\n",
-           "R1: LOSS-BASED | TargetMove: ",DoubleToString(Recovery1TargetMoveUSD,2)," USD | MaxLot: ",DoubleToString(Recovery1MaxLot,2),"\n",
-           "R2: LOSS-BASED | TargetMove: ",DoubleToString(Recovery2TargetMoveUSD,2)," USD | MaxLot: ",DoubleToString(Recovery2MaxLot,2)," | Gap: ",DoubleToString(Recovery2GapPoints,0)," points\n
+           "R1: WHOLE-BASKET | TargetMove: ",DoubleToString(Recovery1TargetMoveUSD,2)," USD | MaxLot: ",DoubleToString(Recovery1MaxLot,2),"\n",
+           "R2: WHOLE-BASKET | TargetMove: ",DoubleToString(Recovery2TargetMoveUSD,2)," USD | MaxLot: ",DoubleToString(Recovery2MaxLot,2)," | Gap: ",DoubleToString(Recovery2GapPoints,0)," points\n
            "Target: ",DoubleToString(TargetProfitUSD,2)," | Trail: ",(BasketTrailingActive?"ON":"OFF")," | Peak: ",DoubleToString(BasketPeakProfit,2),"\n",
            "DD: ",DoubleToString(dd,2),"%");
 }
