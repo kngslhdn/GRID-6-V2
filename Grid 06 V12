@@ -5,7 +5,7 @@
 //| XAUUSDm / M5 / 100% real ticks                                  |
 //+------------------------------------------------------------------+
 #property strict
-#property version "12.03"
+#property version "12.04"
 
 #include <Trade/Trade.mqh>
 CTrade trade;
