@@ -5,7 +5,7 @@
 //| XAUUSDm / M5 / 100% real ticks                                  |
 //+------------------------------------------------------------------+
 #property strict
-#property version "12.02"
+#property version "12.03"
 
 #include <Trade/Trade.mqh>
 CTrade trade;
@@ -38,7 +38,7 @@ input int    MaxOrders               = 3;
 //================ TWO-STAGE RECOVERY =================//
 // R1 is loss-based: it recalculates the complete primary 1/2/3
 // basket loss at trigger time instead of using a fixed multiplier.
-// R2 keeps its existing multiplier-based sizing.
+// R2 is also loss-based: if R1 fails, R2 recalculates the full current basket loss.
 input bool   EnableRecovery          = true;
 // R1 is calculated from the actual 1/2/3 primary basket loss.
 // The multiplier is no longer used for R1 sizing.
@@ -47,9 +47,11 @@ input bool   EnableRecovery          = true;
 // complete primary/basket loss plus TargetProfitUSD.
 input double Recovery1TargetMoveUSD  = 1.50;
 input double Recovery1MaxLot         = 2.0;
-input double Recovery2Multiplier     = 30.0;
+// R2 is sized for a fast reversal recovery using the actual basket loss.
+input double Recovery2TargetMoveUSD  = 1.50;
 input double Recovery2GapPoints      = 6250.0;
-input double Recovery2MaxLot         = 2.0;
+// R2 may need to recover the primary basket + R1 loss.
+input double Recovery2MaxLot         = 10.0;
 input bool   RecoveryOnlyWhenMinus   = true;
 input int    MaxRecoveryStages       = 2;
 
@@ -393,12 +395,51 @@ void ManageRecoveryStage1(ENUM_POSITION_TYPE primaryType){
 }
 
 //+------------------------------------------------------------------+
+//| FUNCTION: CalculateRecovery2Lot                                  |
+//| R2 is loss-based and sized for a fast reversal recovery.        |
+//+------------------------------------------------------------------+
+double CalculateRecovery2Lot(ENUM_POSITION_TYPE recoveryType,double basketLoss){
+   if(basketLoss<=0.0 || Recovery2TargetMoveUSD<=0.0) return 0.0;
+
+   double bid=SymbolInfoDouble(SymbolTrade,SYMBOL_BID);
+   double ask=SymbolInfoDouble(SymbolTrade,SYMBOL_ASK);
+   double entry=(recoveryType==POSITION_TYPE_BUY)?ask:bid;
+   if(entry<=0.0) return 0.0;
+
+   double target=(recoveryType==POSITION_TYPE_BUY)
+                 ? entry+Recovery2TargetMoveUSD
+                 : entry-Recovery2TargetMoveUSD;
+
+   ENUM_ORDER_TYPE recoveryOrder=(recoveryType==POSITION_TYPE_BUY)
+                                  ? ORDER_TYPE_BUY
+                                  : ORDER_TYPE_SELL;
+
+   double profitPerLot=0.0;
+   if(!OrderCalcProfit(recoveryOrder,SymbolTrade,1.0,entry,target,profitPerLot))
+      return 0.0;
+
+   profitPerLot=MathAbs(profitPerLot);
+   if(profitPerLot<=0.0) return 0.0;
+
+   double requiredProfit=basketLoss+MathMax(TargetProfitUSD,0.0);
+   double rawLot=requiredProfit/profitPerLot;
+
+   // Round UP so R2 does not undershoot because of broker volume steps.
+   double step=SymbolInfoDouble(SymbolTrade,SYMBOL_VOLUME_STEP);
+   if(step<=0.0) step=0.01;
+   double lot=MathCeil((rawLot/step)-1e-9)*step;
+   return NormalizeVolume(lot);
+}
+
+//+------------------------------------------------------------------+
 //| FUNCTION: ManageRecoveryStage2                                  |
 //+------------------------------------------------------------------+
 void ManageRecoveryStage2(){
    if(!EnableRecovery || RecoveryStage!=1 || MaxRecoveryStages<2) return;
    if(Recovery1Lots<=0 || Recovery1EntryPrice<=0) return;
    if(Recovery1Profit>=0.0) return;
+
+   UpdateStatus();
    if(RecoveryOnlyWhenMinus && BasketProfitValue>=0.0) return;
 
    double point=SymbolInfoDouble(SymbolTrade,SYMBOL_POINT); if(point<=0) return;
@@ -410,31 +451,50 @@ void ManageRecoveryStage2(){
 
    if(adversePoints<Recovery2GapPoints) return;
 
-   double baseLots=BuyLots+SellLots;
-   if(baseLots<=0) return;
+   // Re-read the full live basket immediately before sizing R2.
+   double basketBefore=BasketProfitValue;
+   double basketLoss=MathAbs(basketBefore);
+   if(basketLoss<=0.0) return;
 
-   double lot=NormalizeVolume(baseLots*Recovery2Multiplier);
-   if(Recovery2MaxLot>0.0) lot=NormalizeVolume(MathMin(lot,Recovery2MaxLot));
-   if(lot<=0) return;
+   // R2 is opposite to R1.
+   ENUM_POSITION_TYPE r2Type=(Recovery1Type==POSITION_TYPE_BUY)
+                              ? POSITION_TYPE_SELL
+                              : POSITION_TYPE_BUY;
+
+   double rawLot=CalculateRecovery2Lot(r2Type,basketLoss);
+   if(rawLot<=0.0){
+      PrintFormat("V12 R2 SIZE FAILED | basket=%.2f | targetMove=%.2f",
+                  basketBefore,Recovery2TargetMoveUSD);
+      return;
+   }
+
+   double lot=rawLot;
+   bool capped=false;
+   if(Recovery2MaxLot>0.0 && lot>Recovery2MaxLot){
+      lot=NormalizeVolume(Recovery2MaxLot);
+      capped=true;
+   }
+   if(lot<=0.0) return;
 
    trade.SetExpertMagicNumber(OrdersID); trade.SetTypeFillingBySymbol(SymbolTrade);
    bool ok=false; string c;
-   if(Recovery1Type==POSITION_TYPE_BUY){
-      c=CommentsOrders+" RECOVERY 2 SELL";
-      ok=trade.Sell(lot,SymbolTrade,0,0,0,c);
-   }else{
+   if(r2Type==POSITION_TYPE_BUY){
       c=CommentsOrders+" RECOVERY 2 BUY";
       ok=trade.Buy(lot,SymbolTrade,0,0,0,c);
+   }else{
+      c=CommentsOrders+" RECOVERY 2 SELL";
+      ok=trade.Sell(lot,SymbolTrade,0,0,0,c);
    }
 
    if(ok && TradeOK())
-      PrintFormat("V12 R2 OPEN | basket=%.2f | R1PL=%.2f | R2Lot=%.2f | adverse=%.0f",
-                  BasketProfitValue,Recovery1Profit,lot,adversePoints);
+      PrintFormat("V12 R2 OPEN | basket=%.2f | R1PL=%.2f | R2Lot=%.2f | targetMove=%.2f | adverse=%.0f | capped=%s",
+                  basketBefore,Recovery1Profit,lot,Recovery2TargetMoveUSD,adversePoints,capped?"YES":"NO");
    else
       PrintFormat("V12 R2 FAILED | basket=%.2f | lot=%.2f | retcode=%u | %s",
-                  BasketProfitValue,lot,trade.ResultRetcode(),trade.ResultRetcodeDescription());
+                  basketBefore,lot,trade.ResultRetcode(),trade.ResultRetcodeDescription());
 }
 
+//+------------------------------------------------------------------+
 //+------------------------------------------------------------------+
 //| FUNCTION: ManagePrimaryGrid                                     |
 //+------------------------------------------------------------------+
@@ -566,7 +626,7 @@ void DisplayDashboard(double dd){
            "R1: ",(RecoveryStage>=1?"ACTIVE":"OFF")," | lot=",DoubleToString(Recovery1Lots,2)," | P/L=",DoubleToString(Recovery1Profit,2),"\n",
            "R2: ",(RecoveryStage>=2?"ACTIVE":"OFF")," | lot=",DoubleToString(Recovery2Lots,2)," | P/L=",DoubleToString(Recovery2Profit,2),"\n",
            "R1: LOSS-BASED | TargetMove: ",DoubleToString(Recovery1TargetMoveUSD,2)," USD | MaxLot: ",DoubleToString(Recovery1MaxLot,2),"\n",
-           "R2: ",DoubleToString(Recovery2Multiplier,2),"x | Gap: ",DoubleToString(Recovery2GapPoints,0)," points\n",
+           "R2: LOSS-BASED | TargetMove: ",DoubleToString(Recovery2TargetMoveUSD,2)," USD | MaxLot: ",DoubleToString(Recovery2MaxLot,2)," | Gap: ",DoubleToString(Recovery2GapPoints,0)," points\n
            "Target: ",DoubleToString(TargetProfitUSD,2)," | Trail: ",(BasketTrailingActive?"ON":"OFF")," | Peak: ",DoubleToString(BasketPeakProfit,2),"\n",
            "DD: ",DoubleToString(dd,2),"%");
 }
