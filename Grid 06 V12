@@ -326,7 +326,14 @@ double CalculateRecovery1Lot(ENUM_POSITION_TYPE primaryType,double basketLoss){
    if(profitPerLot<=0.0) return 0.0;
 
    double requiredProfit=basketLoss+MathMax(TargetProfitUSD,0.0);
-   return NormalizeVolume(requiredProfit/profitPerLot);
+   double rawLot=requiredProfit/profitPerLot;
+
+   // Round UP to the broker volume step so the calculated R1 does not
+   // undershoot the recovery amount because of nearest-step rounding.
+   double step=SymbolInfoDouble(SymbolTrade,SYMBOL_VOLUME_STEP);
+   if(step<=0.0) step=0.01;
+   double lot=MathCeil((rawLot/step)-1e-9)*step;
+   return NormalizeVolume(lot);
 }
 
 //+------------------------------------------------------------------+
