@@ -31,10 +31,11 @@ input double    BasketTargetUSD       = 1.0;
 
 input group "=== STAGE 1 CONTROLLED RECOVERY ==="
 input bool      EnableRecoveryStage1  = true;
-input double    RecoveryTriggerPoints = 6250.0;
-input double    RecoveryTargetMoveUSD = 2.50;
+input double    RecoveryTriggerPoints = 500.0;
+input double    RecoveryTargetMoveUSD = 8.00;
 input double    RecoveryMaxLot         = 0.12;
-input double    RecoveryMaxBasketLossUSD = 35.0;
+input double    RecoveryMaxBasketLossUSD = 50.0;
+input int       LossCooldownMinutes    = 60;
 input int       MaxRecoveryStages     = 1; // V24 intentionally caps recovery at R1
 input bool      EnableRecoveryStage2  = false; // reserved; not implemented in V24
 
@@ -63,6 +64,7 @@ bool halted = false;
 double peakBasketProfit = 0.0;
 datetime basketStarted = 0;
 bool recoveryUsed = false;
+datetime cooldownUntil = 0;
 double initialEquity = 0.0;
 double highWaterEquity = 0.0;
 
@@ -114,6 +116,15 @@ int OnInit()
 
    initialEquity = AccountInfoDouble(ACCOUNT_EQUITY);
    highWaterEquity = initialEquity;
+   PrintFormat("V24 symbol spec: %s digits=%d point=%.8f tickSize=%.8f tickValueLoss=%.5f contractSize=%.2f minLot=%.2f lotStep=%.2f",
+               tradeSymbol,
+               (int)SymbolInfoInteger(tradeSymbol, SYMBOL_DIGITS),
+               SymbolInfoDouble(tradeSymbol, SYMBOL_POINT),
+               SymbolInfoDouble(tradeSymbol, SYMBOL_TRADE_TICK_SIZE),
+               SymbolInfoDouble(tradeSymbol, SYMBOL_TRADE_TICK_VALUE_LOSS),
+               SymbolInfoDouble(tradeSymbol, SYMBOL_TRADE_CONTRACT_SIZE),
+               SymbolInfoDouble(tradeSymbol, SYMBOL_VOLUME_MIN),
+               SymbolInfoDouble(tradeSymbol, SYMBOL_VOLUME_STEP));
 
    if(AccountInfoInteger(ACCOUNT_MARGIN_MODE) != ACCOUNT_MARGIN_MODE_RETAIL_HEDGING)
    {
@@ -156,11 +167,17 @@ void OnTick()
 
    if(b.totalProfit <= -RecoveryMaxBasketLossUSD)
    {
-      PrintFormat("V24 basket loss cap reached: %.2f", b.totalProfit);
+      PrintFormat("V24 basket loss cap reached: %.2f; closing basket and entering cooldown.", b.totalProfit);
       CloseBasket();
       RefreshBasket(b);
-      if(b.buys + b.sells == 0) halted = true;
-      Display(b, dd, halted ? "HALTED: BASKET LOSS LIMIT" : "RISK CLOSE RETRY");
+      if(b.buys + b.sells == 0)
+      {
+         cooldownUntil = TimeCurrent() + MathMax(0, LossCooldownMinutes) * 60;
+         basketStarted = 0;
+         peakBasketProfit = 0;
+         recoveryUsed = false;
+      }
+      Display(b, dd, (b.buys + b.sells == 0) ? "BASKET STOP: COOLDOWN" : "RISK CLOSE RETRY");
       return;
    }
 
@@ -202,6 +219,12 @@ void OnTick()
             return;
          }
       }
+   }
+
+   if(cooldownUntil > TimeCurrent())
+   {
+      Display(b, dd, "LOSS COOLDOWN UNTIL " + TimeToString(cooldownUntil, TIME_DATE|TIME_MINUTES));
+      return;
    }
 
    if(!IsTradingHour())
@@ -438,8 +461,9 @@ void TryOpenRecovery(ENUM_ORDER_TYPE type, BasketInfo &b)
       return;
    }
    recoveryUsed = true;
-   PrintFormat("V24 R1 opened %.2f lot. basket before R1 %.2f, projected target %.2f",
-               lot, b.totalProfit, BasketTargetUSD);
+   PrintFormat("V24 R1 OPENED: type=%s lot=%.2f basketBefore=%.2f targetMove=%.2f priceUnits basketTarget=%.2f maxR1Lot=%.2f",
+               (type == ORDER_TYPE_BUY ? "BUY" : "SELL"), lot, b.totalProfit,
+               RecoveryTargetMoveUSD, BasketTargetUSD, RecoveryMaxLot);
 }
 
 double FindRecoveryLot(ENUM_ORDER_TYPE type, double entry, double target, BasketInfo &b)
