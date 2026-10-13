@@ -8,9 +8,9 @@
 - MA200 trend-side filter remains enabled.
 - Primary grid defaults: 0.01 base lot, maximum 3 primary positions, 6,250-point first gap, 1.30 gap multiplier, primary volume capped at 0.03.
 - Stage 1 recovery only; Stage 2 is intentionally disabled.
-- Recovery volume is calculated with OrderCalcProfit against a projected basket target and is capped at 0.12 lots. If the projected $2 net basket target cannot be reached within the cap, the recovery trade is skipped.
+- Recovery volume is calculated with OrderCalcProfit against a projected basket target and is capped at 0.12 lots. If the projected $1 net basket target cannot be reached within the cap, the recovery trade is skipped.
 - Recovery basket exits at the configured net basket target ($2). Otherwise the normal basket trailing begins at $5 and trails by $2.
-- Risk controls: 10% equity drawdown from the running equity high-water mark, $35 basket loss cap, 35% projected margin-use cap, and 8-hour basket timeout.
+- Risk controls: 10% equity drawdown from the running equity high-water mark, $50 basket loss cap, 35% projected margin-use cap, 8-hour basket timeout, and 60-minute cooldown after a basket-loss stop.
 - Position close/open requests check the trade-server retcode. Emergency close attempts are retried on later ticks if exposure remains.
 - Requires a hedging account so primary and recovery positions remain individually identifiable.
 
@@ -25,7 +25,7 @@
 | Gap multiplier | 1.30 |
 | Max primary lot | 0.03 |
 | Recovery Stage 1 | Enabled |
-| Recovery trigger | 500 points adverse from latest primary entry |
+| Recovery trigger | 50 points adverse from latest primary entry |
 | Recovery target move | $8.00 price movement |
 | Recovery max lot | 0.12 |
 | Recovery basket loss cap | $50 |
@@ -38,7 +38,7 @@
 ## Important limitations
 - These values are starting test parameters, not proven optimal settings or a promise of recovery.
 - Martingale/grid strategies cannot guarantee recovery if price trends against the basket. If the target requires a recovery lot above the cap, V24 skips the R1 order.
-- The basket loss and equity limits are software triggers, not guaranteed fill prices. The $50 basket stop allows more room for the primary grid to reach R1 but also increases the maximum intended loss per basket versus the previous $35 cap. Gaps, slippage, spread, market closure, or rejected trade requests can cause a different realized loss.
+- The basket loss and equity limits are software triggers, not guaranteed fill prices. The 50-point R1 trigger is intended to open recovery earlier and reduce primary floating loss before hedging. Verify the actual point-to-price conversion for the broker symbol. The $50 basket stop is a software trigger, not a guaranteed maximum realized loss. Gaps, slippage, spread, market closure, or rejected trade requests can cause a different realized loss.
 - The current recovery calculation projects the existing basket and R1 at one target price using OrderCalcProfit; swap/commission can still change before actual closure.
 - RecoveryTargetMoveUSD means a price move in the instrument quote (e.g. $1.50 in XAUUSD price), not $1.50 account profit.
 - MaxBasketHours closes the basket at timeout by default; test this behavior carefully for your broker/session.
