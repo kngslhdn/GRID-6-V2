@@ -31,7 +31,7 @@ input double    BasketTargetUSD       = 1.0;
 
 input group "=== STAGE 1 CONTROLLED RECOVERY ==="
 input bool      EnableRecoveryStage1  = true;
-input double    RecoveryTriggerPoints = 500.0;
+input double    RecoveryTriggerPoints = 50.0; // Earlier R1 trigger to reduce primary basket loss before hedge
 input double    RecoveryTargetMoveUSD = 8.00;
 input double    RecoveryMaxLot         = 0.12;
 input double    RecoveryMaxBasketLossUSD = 50.0;
