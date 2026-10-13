@@ -32,7 +32,7 @@ input double    BasketTargetUSD       = 1.0;
 input group "=== STAGE 1 CONTROLLED RECOVERY ==="
 input bool      EnableRecoveryStage1  = true;
 input double    RecoveryTriggerPoints = 6250.0;
-input double    RecoveryTargetMoveUSD = 1.50;
+input double    RecoveryTargetMoveUSD = 2.50;
 input double    RecoveryMaxLot         = 0.12;
 input double    RecoveryMaxBasketLossUSD = 35.0;
 input int       MaxRecoveryStages     = 1; // V24 intentionally caps recovery at R1
