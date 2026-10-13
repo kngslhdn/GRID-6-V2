@@ -25,11 +25,11 @@
 | Gap multiplier | 1.30 |
 | Max primary lot | 0.03 |
 | Recovery Stage 1 | Enabled |
-| Recovery trigger | 10000 points adverse from latest primary entry |
-| Recovery target move | $1.50 price movement |
+| Recovery trigger | 6250 points adverse from latest primary entry |
+| Recovery target move | $2.50 price movement |
 | Recovery max lot | 0.12 |
 | Recovery basket loss cap | $35 |
-| Basket net target after R1 | $2 |
+| Basket net target after R1 | $1 |
 | Trailing start / distance | $5 / $2 |
 | Equity DD limit | 10% from high-water equity |
 | Projected margin usage cap | 35% |
