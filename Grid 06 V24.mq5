@@ -172,7 +172,7 @@ void OnTick()
       RefreshBasket(b);
       if(b.buys + b.sells == 0)
       {
-         cooldownUntil = TimeCurrent() + MathMax(0, LossCooldownMinutes) * 60;
+         cooldownUntil = TimeCurrent() + (LossCooldownMinutes > 0 ? LossCooldownMinutes * 60 : 0);
          basketStarted = 0;
          peakBasketProfit = 0;
          recoveryUsed = false;
