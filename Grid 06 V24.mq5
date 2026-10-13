@@ -148,8 +148,9 @@ void OnTick()
    {
       PrintFormat("V24 emergency exit: equity drawdown %.2f%%", dd);
       CloseBasket();
-      halted = true;
-      Display(b, dd, "HALTED: EQUITY DD LIMIT");
+      RefreshBasket(b);
+      if(b.buys + b.sells == 0) halted = true;
+      Display(b, dd, halted ? "HALTED: EQUITY DD LIMIT" : "RISK CLOSE RETRY");
       return;
    }
 
@@ -157,8 +158,9 @@ void OnTick()
    {
       PrintFormat("V24 basket loss cap reached: %.2f", b.totalProfit);
       CloseBasket();
-      halted = true;
-      Display(b, dd, "HALTED: BASKET LOSS LIMIT");
+      RefreshBasket(b);
+      if(b.buys + b.sells == 0) halted = true;
+      Display(b, dd, halted ? "HALTED: BASKET LOSS LIMIT" : "RISK CLOSE RETRY");
       return;
    }
 
@@ -176,6 +178,13 @@ void OnTick()
       if(basketStarted == 0) basketStarted = b.oldestTime;
       ManageBasketExit(b);
       if(halted) return;
+      RefreshBasket(b);
+      if(b.buys + b.sells == 0)
+      {
+         // Do not immediately reopen a new basket on the same tick as an exit.
+         Display(b, dd, "BASKET CLOSED");
+         return;
+      }
 
       if(MaxBasketHours > 0 && basketStarted > 0 &&
          TimeCurrent() - basketStarted >= MaxBasketHours * 3600)
