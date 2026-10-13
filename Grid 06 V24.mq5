@@ -338,15 +338,25 @@ void RefreshBasket(BasketInfo &b)
 void ManageBasketExit(BasketInfo &b)
 {
    if(b.buys + b.sells == 0) return;
+
+   // Once R1 has been used, prioritize a small net recovery exit over waiting
+   // for the normal $5 trailing activation. This is still not a guarantee
+   // that the basket will reach the target.
+   if(recoveryUsed && b.totalProfit >= BasketTargetUSD)
+   {
+      PrintFormat("V24 recovery basket target reached: %.2f", b.totalProfit);
+      CloseBasket();
+      return;
+   }
+
    if(!UseBasketTrailing)
    {
       if(b.totalProfit >= BasketTargetUSD) CloseBasket();
       return;
    }
-   if(b.totalProfit >= TrailingStartUSD)
-   {
-      if(b.totalProfit > peakBasketProfit) peakBasketProfit = b.totalProfit;
-   }
+   if(b.totalProfit >= TrailingStartUSD && b.totalProfit > peakBasketProfit)
+      peakBasketProfit = b.totalProfit;
+
    if(peakBasketProfit >= TrailingStartUSD &&
       b.totalProfit <= peakBasketProfit - TrailingStopUSD)
    {
