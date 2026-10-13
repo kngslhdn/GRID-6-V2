@@ -318,9 +318,11 @@ void RefreshBasket(BasketInfo &b)
       ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
       string comment = PositionGetString(POSITION_COMMENT);
       bool isRecovery = (StringFind(comment, "V24 R1") >= 0);
+      // Position-level commission is deprecated in current MQL5 builds.
+      // Basket P/L uses floating profit + swap; check tester deal history
+      // for commissions when evaluating final net results.
       double profit = PositionGetDouble(POSITION_PROFIT) +
-                      PositionGetDouble(POSITION_SWAP) +
-                      PositionGetDouble(POSITION_COMMISSION);
+                      PositionGetDouble(POSITION_SWAP);
       double volume = PositionGetDouble(POSITION_VOLUME);
       double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
       datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
@@ -446,8 +448,7 @@ double FindRecoveryLot(ENUM_ORDER_TYPE type, double entry, double target, Basket
                              PositionGetDouble(POSITION_PRICE_OPEN), target, pl))
          { projected = -DBL_MAX; break; }
          projected += pl - (PositionGetDouble(POSITION_PROFIT) +
-                            PositionGetDouble(POSITION_SWAP) +
-                            PositionGetDouble(POSITION_COMMISSION));
+                            PositionGetDouble(POSITION_SWAP));
       }
       double r1pl = 0;
       if(!OrderCalcProfit(type, tradeSymbol, lot, entry, target, r1pl)) continue;
@@ -535,8 +536,7 @@ void RefreshAfterCloseState()
 
 void Display(BasketInfo &b, double dd, string state)
 {
-   Comment("========== GRID 06 V24 ==========
-",
+   Comment("========== GRID 06 V24 ==========\n",
            "State: ", state, "\n",
            "Symbol: ", tradeSymbol, " | TF: ", EnumToString((ENUM_TIMEFRAMES)_Period), "\n",
            "Primary BUY/SELL: ", b.primaryBuys, "/", b.primarySells, "\n",
