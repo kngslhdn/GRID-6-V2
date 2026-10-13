@@ -25,20 +25,20 @@
 | Gap multiplier | 1.30 |
 | Max primary lot | 0.03 |
 | Recovery Stage 1 | Enabled |
-| Recovery trigger | 6250 points adverse from latest primary entry |
-| Recovery target move | $2.50 price movement |
+| Recovery trigger | 500 points adverse from latest primary entry |
+| Recovery target move | $8.00 price movement |
 | Recovery max lot | 0.12 |
-| Recovery basket loss cap | $35 |
+| Recovery basket loss cap | $50 |
 | Basket net target after R1 | $1 |
 | Trailing start / distance | $5 / $2 |
 | Equity DD limit | 10% from high-water equity |
 | Projected margin usage cap | 35% |
-| Max basket duration | 8 hours |
+| Max basket duration | 8 hours |\n| Cooldown after basket-loss stop | 60 minutes |
 
 ## Important limitations
 - These values are starting test parameters, not proven optimal settings or a promise of recovery.
 - Martingale/grid strategies cannot guarantee recovery if price trends against the basket. If the target requires a recovery lot above the cap, V24 skips the R1 order.
-- The basket loss and equity limits are software triggers, not guaranteed fill prices. Gaps, slippage, spread, market closure, or rejected trade requests can cause a different realized loss.
+- The basket loss and equity limits are software triggers, not guaranteed fill prices. The $50 basket stop allows more room for the primary grid to reach R1 but also increases the maximum intended loss per basket versus the previous $35 cap. Gaps, slippage, spread, market closure, or rejected trade requests can cause a different realized loss.
 - The current recovery calculation projects the existing basket and R1 at one target price using OrderCalcProfit; swap/commission can still change before actual closure.
 - RecoveryTargetMoveUSD means a price move in the instrument quote (e.g. $1.50 in XAUUSD price), not $1.50 account profit.
 - MaxBasketHours closes the basket at timeout by default; test this behavior carefully for your broker/session.
