@@ -27,11 +27,11 @@ input int       MaxPrimaryOrders      = 3;
 input double    FirstGapPoints        = 6250.0;
 input double    GapMultiplier         = 1.30;
 input double    MaxPrimaryLot         = 0.03;
-input double    BasketTargetUSD       = 2.0;
+input double    BasketTargetUSD       = 1.0;
 
 input group "=== STAGE 1 CONTROLLED RECOVERY ==="
 input bool      EnableRecoveryStage1  = true;
-input double    RecoveryTriggerPoints = 10000.0;
+input double    RecoveryTriggerPoints = 6250.0;
 input double    RecoveryTargetMoveUSD = 1.50;
 input double    RecoveryMaxLot         = 0.12;
 input double    RecoveryMaxBasketLossUSD = 35.0;
@@ -272,6 +272,19 @@ void OnTick()
 
          if(trigger && atr >= 2.0 * _Point)
             TryOpenRecovery(recoveryType, b);
+         else if(!recoveryUsed && b.primaryBuys + b.primarySells >= MaxPrimaryOrders &&
+                 b.totalProfit < 0 && b.totalProfit > -RecoveryMaxBasketLossUSD)
+         {
+            static datetime lastRecoveryDiagnostic = 0;
+            if(TimeCurrent() - lastRecoveryDiagnostic >= 300)
+            {
+               PrintFormat("V24 R1 WAIT: trigger=%s | primary=%d/%d | basket P/L=%.2f | current=%.3f | trigger price=%.3f | adverse threshold=%.1f points",
+                           (trigger ? "YES" : "NO"),
+                           b.primaryBuys + b.primarySells, MaxPrimaryOrders, b.totalProfit,
+                           current, triggerPrice, RecoveryTriggerPoints);
+               lastRecoveryDiagnostic = TimeCurrent();
+            }
+         }
       }
    }
 
@@ -405,10 +418,16 @@ void TryOpenRecovery(ENUM_ORDER_TYPE type, BasketInfo &b)
    double lot = FindRecoveryLot(type, entry, target, b);
    if(lot <= 0)
    {
-      Print("V24 R1 skipped: target cannot be reached within recovery lot cap.");
+      PrintFormat("V24 R1 SKIPPED: target not reachable within cap %.2f lots. Basket P/L=%.2f, target move=%.2f, basket target=%.2f. Reduce target, trigger earlier, or accept that this basket cannot be recovered within current risk cap.",
+                  RecoveryMaxLot, b.totalProfit, RecoveryTargetMoveUSD, BasketTargetUSD);
       return;
    }
-   if(!CanAddExposure(lot, type)) return;
+   if(!CanAddExposure(lot, type))
+   {
+      PrintFormat("V24 R1 BLOCKED by margin guard. Required lot=%.2f, current basket P/L=%.2f, margin usage limit=%.1f%%.",
+                  lot, b.totalProfit, MaxMarginUsagePct);
+      return;
+   }
 
    bool ok = (type == ORDER_TYPE_BUY)
       ? trade.Buy(lot, tradeSymbol, 0, 0, 0, OrderComment + " V24 R1 BUY")
